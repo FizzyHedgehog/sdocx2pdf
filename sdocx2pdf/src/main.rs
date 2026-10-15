@@ -1,7 +1,7 @@
 use std::{io::Write, path::PathBuf, process::ExitCode, time::Duration};
 
 use anyhow::{Context, anyhow};
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use itertools::Itertools;
 use jiff::{
@@ -16,29 +16,12 @@ use krilla::{
 use log::{info, warn};
 use sdocx::{Document, DocumentError, MediaStorage};
 
-use crate::page::{EmbedMap, PageConversionCtx};
-
-mod page;
-mod pdf;
-mod shape;
-mod stroke;
-mod tool;
+use sdocx2pdf::{
+    BasicSplitMode,
+    page::{self, EmbedMap, PageConversionCtx},
+};
 
 const DETAILED_ERRORS_ARG_NAME: &str = "--detailed-errors";
-
-#[derive(ValueEnum, Clone, Copy)]
-enum BasicSplitMode {
-    #[value(
-        help = "Split the document into portrait pages with a 1:√2 aspect ratio, \
-    like ISO 216 paper sizes (A1, A2, A3, A4, etc.)"
-    )]
-    IsoPortrait,
-    #[value(
-        help = "Split the document into landscape pages with a √2:1 aspect ratio, \
-    like ISO 216 paper sizes (A1, A2, A3, A4, etc.)"
-    )]
-    IsoLandscape,
-}
 
 fn parse_stroke_width_mul(s: &str) -> Result<f32, String> {
     // Extremely small width multipliers cause numerical problems in the stroke processing, and
