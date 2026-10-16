@@ -497,9 +497,13 @@ impl ShapeDrawingCtx for PageConversionCtx<'_> {
                             error!("Opened but failed to read image '{n}': {error}")
                         }
 
-                        ImageDrawingError::NotValidJpeg { name, .. } => {
+                        ImageDrawingError::InvalidImage { format, name, err } => {
+                            error!("Image '{name}' is not a valid {format}: {err}")
+                        }
+
+                        ImageDrawingError::UnsupportedFormat { name } => {
                             error!(
-                                "Image '{name}' is not a (valid) JPEG. \
+                                "Image '{name}' is in an unsupported format. \
                                 It may be an SPI file; this is a proprietary format \
                                 which is not yet supported."
                             )
@@ -533,6 +537,28 @@ impl ShapeDrawingCtx for PageConversionCtx<'_> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupportedImageFormat {
+    Jpeg,
+    Png,
+    Gif,
+    Webp,
+}
+
+fn detect_image_format(bytes: &[u8]) -> Option<SupportedImageFormat> {
+    if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
+        Some(SupportedImageFormat::Png)
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some(SupportedImageFormat::Jpeg)
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some(SupportedImageFormat::Gif)
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some(SupportedImageFormat::Webp)
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ImageDrawingError {
     #[error("failed to open image file '{1}'")]
@@ -541,8 +567,15 @@ pub enum ImageDrawingError {
     #[error("successfully opened image file '{1}', but failed to read it")]
     FailedToRead(std::io::Error, String),
 
-    #[error("image '{name}' is not a valid JPEG")]
-    NotValidJpeg { krilla_err: String, name: String },
+    #[error("image '{name}' is not a valid {format}: {err}")]
+    InvalidImage {
+        format: &'static str,
+        err: String,
+        name: String,
+    },
+
+    #[error("image '{name}' is in an unsupported format")]
+    UnsupportedFormat { name: String },
 
     #[error("there is no path for the image")]
     ImagePathMissing,
@@ -580,13 +613,61 @@ impl ImageDrawingCtx for PageConversionCtx<'_> {
             return Err(ImageDrawingError::FailedToRead(err, image_name.into()));
         }
 
-        let image =
-            krilla::image::Image::from_jpeg(image_bytes.into(), true).map_err(|krilla_err| {
-                ImageDrawingError::NotValidJpeg {
-                    krilla_err,
-                    name: image_name.into(),
+        let image = match detect_image_format(&image_bytes) {
+            Some(SupportedImageFormat::Png) => {
+                krilla::image::Image::from_png(image_bytes.into(), true).map_err(|err| {
+                    ImageDrawingError::InvalidImage {
+                        format: "PNG",
+                        err,
+                        name: image_name.into(),
+                    }
+                })?
+            }
+
+            Some(SupportedImageFormat::Jpeg) => {
+                krilla::image::Image::from_jpeg(image_bytes.into(), true).map_err(|err| {
+                    ImageDrawingError::InvalidImage {
+                        format: "JPEG",
+                        err,
+                        name: image_name.into(),
+                    }
+                })?
+            }
+
+            Some(SupportedImageFormat::Gif) => {
+                krilla::image::Image::from_gif(image_bytes.into(), true).map_err(|err| {
+                    ImageDrawingError::InvalidImage {
+                        format: "GIF",
+                        err,
+                        name: image_name.into(),
+                    }
+                })?
+            }
+
+            Some(SupportedImageFormat::Webp) => {
+                krilla::image::Image::from_webp(image_bytes.into(), true).map_err(|err| {
+                    ImageDrawingError::InvalidImage {
+                        format: "WebP",
+                        err,
+                        name: image_name.into(),
+                    }
+                })?
+            }
+
+            None => {
+                // If header doesn't match standard magic bytes, try JPEG then PNG fallback
+                let data: krilla::Data = image_bytes.into();
+                if let Ok(img) = krilla::image::Image::from_jpeg(data.clone(), true) {
+                    img
+                } else if let Ok(img) = krilla::image::Image::from_png(data, true) {
+                    img
+                } else {
+                    return Err(ImageDrawingError::UnsupportedFormat {
+                        name: image_name.into(),
+                    });
                 }
-            })?;
+            }
+        };
 
         // Original box on page (without rotation), crop box (in pixels, with (0, 0) at the top left of the image), and
         // x and y scales to get from image space to SDOCX space.
@@ -697,3 +778,49 @@ impl ImageDrawingCtx for PageConversionCtx<'_> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_detect_image_format() {
+        let png_bytes = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00];
+        assert_eq!(detect_image_format(&png_bytes), Some(SupportedImageFormat::Png));
+
+        let jpeg_bytes = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        assert_eq!(detect_image_format(&jpeg_bytes), Some(SupportedImageFormat::Jpeg));
+
+        let gif87_bytes = b"GIF87a...";
+        assert_eq!(detect_image_format(gif87_bytes), Some(SupportedImageFormat::Gif));
+
+        let gif89_bytes = b"GIF89a...";
+        assert_eq!(detect_image_format(gif89_bytes), Some(SupportedImageFormat::Gif));
+
+        let webp_bytes = b"RIFF\x00\x00\x00\x00WEBPVP8 ...";
+        assert_eq!(detect_image_format(webp_bytes), Some(SupportedImageFormat::Webp));
+
+        let random_bytes = [0x01, 0x02, 0x03, 0x04];
+        assert_eq!(detect_image_format(&random_bytes), None);
+    }
+
+    #[test]
+    fn test_png_decode_with_krilla() {
+        // Minimal 1x1 transparent RGBA PNG
+        let png_data: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+
+        assert_eq!(detect_image_format(png_data), Some(SupportedImageFormat::Png));
+
+        let image = krilla::image::Image::from_png(png_data.to_vec().into(), true);
+        assert!(image.is_ok(), "Failed to decode valid PNG: {:?}", image.err());
+        let image = image.unwrap();
+        assert_eq!(image.size(), (1, 1));
+    }
+}
+

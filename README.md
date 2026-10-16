@@ -251,10 +251,11 @@ are calculated so that the body of the bean roughly follows the shape of the str
 points. For some pens, the width of the bean is determined using pressure.
 
 [^1]:
-    Some images in SDOCX files are embedded in JPEG format, and others in SPI format. sdocx2pdf
-    will embed JPEGs in the output PDF, but SPI files are currently unsupported as the SPI format
-    is proprietary and sdocx2pdf does not include a decoder for it. Samsung Notes will convert
-    images to SPI format under certain circumstances, such as if the 'lasso crop' tool is used.
+    Some images in SDOCX files are embedded in JPEG or PNG format, and others in SPI format.
+    sdocx2pdf will embed JPEGs and PNGs in the output PDF, but SPI files are currently unsupported as
+    the SPI format is proprietary and sdocx2pdf does not include a decoder for it. Samsung Notes
+    will convert images to SPI format under certain circumstances, such as if the 'lasso crop' tool
+    is used.
 
 [^2]:
     In fact, the Windows app stores documents in an extracted SDOCX format that sdocx2pdf supports.

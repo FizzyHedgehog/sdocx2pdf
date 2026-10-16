@@ -1092,6 +1092,7 @@ checksum = "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495"
 dependencies = [
  "bytemuck",
  "num-traits",
+ "serde",
 ]
 
 [[package]]
@@ -1175,6 +1176,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7d950ca161dc355eaf28f82b11345ed76c6e1f6eb1f4f4479e0323b9e2fbd0e"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "oxiarc-core"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "119a925483e4917b645fd77acef86859164e166faa4cce3353c1d7cecfd3665a"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
+name = "oxiarc-lz4"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c5cccbb2bc13e1654444de7eca50e492f5613629b98a77354936e49f7cc71a32"
+dependencies = [
+ "oxiarc-core",
+]
+
+[[package]]
+name = "oxiarc-zstd"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5dfe82b51b13660b3c44c80706eecf7e477bbce3a2b1509a83631a2ca6b955ce"
+dependencies = [
+ "oxiarc-core",
 ]
 
 [[package]]
@@ -1689,6 +1717,7 @@ dependencies = [
  "crossbeam-utils",
  "getrandom 0.3.4",
  "getrandom 0.4.2",
+ "libc",
  "ndarray",
  "ndarray-rand",
  "num-complex",
@@ -1696,6 +1725,8 @@ dependencies = [
  "num-traits",
  "num_cpus",
  "once_cell",
+ "oxiarc-lz4",
+ "oxiarc-zstd",
  "oxiblas-blas",
  "oxiblas-lapack",
  "oxiblas-ndarray",
@@ -1704,6 +1735,8 @@ dependencies = [
  "rand_chacha 0.10.0",
  "rand_distr 0.6.0",
  "rayon",
+ "serde",
+ "serde_json",
  "thiserror",
  "uuid",
  "wide 1.5.0",
@@ -1798,11 +1831,13 @@ dependencies = [
  "kahan",
  "krilla",
  "lerp",
+ "libc",
  "log",
  "ndarray",
  "num",
  "once_cell",
  "ordered-float",
+ "scirs2-core",
  "scirs2-interpolate",
  "sdocx",
  "thiserror",
