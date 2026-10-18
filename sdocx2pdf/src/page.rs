@@ -1079,6 +1079,7 @@ impl<'s> PageConversionCtx<'s> {
             None,
             0,
             inline_objects,
+            std::iter::empty(),
             pen_width_mul,
             marker_width_mul,
             media,
@@ -1091,6 +1092,7 @@ impl<'s> PageConversionCtx<'s> {
         opt_body_text: Option<&sdocx::page::object::text::Text>,
         page_index: usize,
         inline_objects: impl IntoIterator<Item = &'a InlineObject>,
+        floating_objects: impl IntoIterator<Item = &'a DocObject>,
         pen_width_mul: f32,
         marker_width_mul: f32,
         media: &mut MediaStorage,
@@ -1120,6 +1122,14 @@ impl<'s> PageConversionCtx<'s> {
         let max_line_width = (max_x - start_x).max(100.0);
         const INLINE_GAP: f32 = 25.55;
 
+        let floating_image_boxes: Vec<sdocx::Box2d<f64>> = floating_objects
+            .into_iter()
+            .filter_map(|obj| match obj {
+                DocObject::Image(_) => Some(obj.object_base().rect),
+                _ => None,
+            })
+            .collect();
+
         let mut current_flow_bottom: Option<f32> = None;
 
         let full_text = opt_body_text.and_then(|bt| bt.raw_string()).unwrap_or("");
@@ -1131,7 +1141,12 @@ impl<'s> PageConversionCtx<'s> {
                 let (sec_start, sec_count) = section_data[page_index];
                 let start_u16 = (sec_start as usize).min(utf16_units.len());
                 let end_u16 = (start_u16 + sec_count as usize).min(utf16_units.len());
-                (&utf16_units[start_u16..end_u16], start_u16)
+                let slice = &utf16_units[start_u16..end_u16];
+                if page_index > 0 && !slice.is_empty() && slice[0] == 0x000A {
+                    (&slice[1..], start_u16 + 1)
+                } else {
+                    (slice, start_u16)
+                }
             } else {
                 (&[][..], 0)
             }
@@ -1180,6 +1195,16 @@ impl<'s> PageConversionCtx<'s> {
                         let [b, g, r, a] = opt_body_text
                             .map(|bt| bt.text_color_at(sub_doc_u16_pos))
                             .unwrap_or([37, 37, 37, 255]);
+                        for bbox in &floating_image_boxes {
+                            let min_y = bbox.min.y as f32;
+                            let max_y = bbox.max.y as f32;
+                            let min_x = bbox.min.x as f32;
+                            let max_x_box = bbox.max.x as f32;
+                            if min_x < max_x && max_x_box > start_x && cur_y >= min_y - 15.0 && cur_y < max_y {
+                                cur_y = max_y + INLINE_GAP;
+                                current_flow_bottom = Some(cur_y);
+                            }
+                        }
 
                         let sub_text = String::from_utf16_lossy(sub_u16);
                         let trimmed = sub_text.trim_end();
@@ -1269,6 +1294,17 @@ impl<'s> PageConversionCtx<'s> {
                     let [b, g, r, a] = opt_body_text
                         .map(|bt| bt.text_color_at(line_doc_u16_pos))
                         .unwrap_or([37, 37, 37, 255]);
+
+                    for bbox in &floating_image_boxes {
+                        let min_y = bbox.min.y as f32;
+                        let max_y = bbox.max.y as f32;
+                        let min_x = bbox.min.x as f32;
+                        let max_x_box = bbox.max.x as f32;
+                        if min_x < max_x && max_x_box > start_x && cur_y >= min_y - 15.0 && cur_y < max_y {
+                            cur_y = max_y + INLINE_GAP;
+                            current_flow_bottom = Some(cur_y);
+                        }
+                    }
 
                     let line_text = String::from_utf16_lossy(line_u16);
                     let trimmed = line_text.trim_end();

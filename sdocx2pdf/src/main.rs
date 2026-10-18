@@ -239,6 +239,7 @@ fn create_document_pdf(
             Some(document.body_text()),
             page_index,
             page.inline_objects(),
+            page.objects(),
             args.pen_width_multiplier,
             args.marker_width_multiplier,
             media_storage,

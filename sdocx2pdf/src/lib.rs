@@ -101,6 +101,7 @@ pub fn convert_sdocx_to_pdf(
             Some(document.body_text()),
             page_index,
             page.inline_objects(),
+            page.objects(),
             pen_multiplier,
             marker_multiplier,
             &mut media_storage,
@@ -127,3 +128,4 @@ pub fn convert_sdocx_to_pdf(
 
     Ok(())
 }
+
