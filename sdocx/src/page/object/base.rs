@@ -171,7 +171,7 @@ pub struct ObjectBase {
     max_width_height: Option<(f32, f32)>,
     append_time: Option<DateTime<Utc>>,
     owner_page_width_height: Option<(u32, u32)>,
-    layout_type: Option<LayoutType>,
+    pub layout_type: Option<LayoutType>,
     unknown_20: Option<[u8; 20]>,
     thumbnail_bind_id: Option<u32>,
     pivot: Option<Point2d<f64>>,

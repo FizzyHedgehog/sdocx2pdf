@@ -1841,6 +1841,7 @@ dependencies = [
  "scirs2-interpolate",
  "sdocx",
  "thiserror",
+ "ttf-parser",
 ]
 
 [[package]]

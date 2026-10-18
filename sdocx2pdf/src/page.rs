@@ -37,78 +37,94 @@ const A4_PORTRAIT_WIDTH_PT: f64 = 210.0 * 2.84526;
 
 static ROBOTO_REGULAR_BYTES: &[u8] = include_bytes!("../fonts/Roboto-Regular.ttf");
 static ROBOTO_BOLD_BYTES: &[u8] = include_bytes!("../fonts/Roboto-Bold.ttf");
-static FONT_REGULAR: OnceLock<Font> = OnceLock::new();
-static FONT_BOLD: OnceLock<Font> = OnceLock::new();
+pub struct LoadedFont {
+    pub font: Font,
+    pub bytes: Arc<Vec<u8>>,
+}
 
-fn get_font(is_bold: bool) -> Font {
-    let font_lock = if is_bold { &FONT_BOLD } else { &FONT_REGULAR };
-    font_lock
-        .get_or_init(|| {
-            let candidate_paths = if is_bold {
-                &[
-                    // Android (One UI & AOSP)
-                    "/system/fonts/SamsungOneKorean-Bold.ttf",
-                    "/system/fonts/NotoSansCJK-Bold.ttc",
-                    "/system/fonts/NotoSansKR-Bold.otf",
-                    "/system/fonts/NotoSansCJK-Regular.ttc",
-                    "/system/fonts/NotoSansKR-Regular.otf",
-                    "/system/fonts/SamsungSans-Regular.ttf",
-                    "/system/fonts/DroidSansFallback.ttf",
-                    // macOS
-                    "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
-                    "/System/Library/Fonts/AppleSDGothicNeo.ttc",
-                    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-                    "/Library/Fonts/Arial Unicode.ttf",
-                    // Linux
-                    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-                    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-                    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-                    "/usr/share/fonts/truetype/nanum/NanumBarunGothicBold.ttf",
-                    "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
-                    // Windows
-                    "C:\\Windows\\Fonts\\malgunbd.ttf",
-                    "C:\\Windows\\Fonts\\malgun.ttf",
-                ][..]
-            } else {
-                &[
-                    // Android (One UI & AOSP)
-                    "/system/fonts/SamsungOneKorean-Regular.ttf",
-                    "/system/fonts/NotoSansCJK-Regular.ttc",
-                    "/system/fonts/NotoSansKR-Regular.otf",
-                    "/system/fonts/SamsungSans-Regular.ttf",
-                    "/system/fonts/DroidSansFallback.ttf",
-                    // macOS
-                    "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
-                    "/System/Library/Fonts/AppleSDGothicNeo.ttc",
-                    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-                    "/Library/Fonts/Arial Unicode.ttf",
-                    // Linux
-                    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-                    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-                    "/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf",
-                    "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
-                    // Windows
-                    "C:\\Windows\\Fonts\\malgun.ttf",
-                    "C:\\Windows\\Fonts\\gulim.ttc",
-                ][..]
-            };
+static LOADED_REGULAR: OnceLock<LoadedFont> = OnceLock::new();
+static LOADED_BOLD: OnceLock<LoadedFont> = OnceLock::new();
 
-            for path in candidate_paths {
-                if let Ok(bytes) = std::fs::read(path) {
-                    if let Some(font) = Font::new(bytes.into(), 0) {
-                        return font;
-                    }
+pub fn get_loaded_font(is_bold: bool) -> &'static LoadedFont {
+    let font_lock = if is_bold { &LOADED_BOLD } else { &LOADED_REGULAR };
+    font_lock.get_or_init(|| {
+        let candidate_paths = if is_bold {
+            &[
+                // Android (One UI & AOSP)
+                "/system/fonts/SamsungOneKorean-Bold.ttf",
+                "/system/fonts/NotoSansCJK-Bold.ttc",
+                "/system/fonts/NotoSansKR-Bold.otf",
+                "/system/fonts/NotoSansCJK-Regular.ttc",
+                "/system/fonts/NotoSansKR-Regular.otf",
+                "/system/fonts/SamsungSans-Regular.ttf",
+                "/system/fonts/DroidSansFallback.ttf",
+                // macOS
+                "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+                "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
+                "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+                "/Library/Fonts/Arial Unicode.ttf",
+                // Linux
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/nanum/NanumBarunGothicBold.ttf",
+                "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+                // Windows
+                "C:\\Windows\\Fonts\\malgunbd.ttf",
+                "C:\\Windows\\Fonts\\malgun.ttf",
+            ][..]
+        } else {
+            &[
+                // Android (One UI & AOSP)
+                "/system/fonts/SamsungOneKorean-Regular.ttf",
+                "/system/fonts/NotoSansCJK-Regular.ttc",
+                "/system/fonts/NotoSansKR-Regular.otf",
+                "/system/fonts/SamsungSans-Regular.ttf",
+                "/system/fonts/DroidSansFallback.ttf",
+                // macOS
+                "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+                "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
+                "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+                "/Library/Fonts/Arial Unicode.ttf",
+                // Linux
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf",
+                "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+                // Windows
+                "C:\\Windows\\Fonts\\malgun.ttf",
+                "C:\\Windows\\Fonts\\gulim.ttc",
+            ][..]
+        };
+
+        for path in candidate_paths {
+            if let Ok(bytes) = std::fs::read(path) {
+                let arc_bytes = Arc::new(bytes);
+                if let Some(font) = Font::new(arc_bytes.clone().into(), 0) {
+                    return LoadedFont {
+                        font,
+                        bytes: arc_bytes,
+                    };
                 }
             }
+        }
 
-            let embedded_bytes = if is_bold {
-                ROBOTO_BOLD_BYTES
-            } else {
-                ROBOTO_REGULAR_BYTES
-            };
-            Font::new(embedded_bytes.into(), 0).expect("embedded fallback font must load")
-        })
-        .clone()
+        let embedded_bytes = if is_bold {
+            ROBOTO_BOLD_BYTES
+        } else {
+            ROBOTO_REGULAR_BYTES
+        };
+        let arc_bytes = Arc::new(embedded_bytes.to_vec());
+        let font = Font::new(arc_bytes.clone().into(), 0).expect("embedded fallback font must load");
+        LoadedFont {
+            font,
+            bytes: arc_bytes,
+        }
+    })
+}
+
+pub fn get_font(is_bold: bool) -> Font {
+    get_loaded_font(is_bold).font.clone()
 }
 
 /// Stores loaded PDFs for embeds.
@@ -886,17 +902,50 @@ pub struct PageConversionCtx<'s> {
     pub surface: Surface<'s>,
 }
 
-fn char_width(c: char, font_size: f32) -> f32 {
-    if c == ' ' {
-        font_size * 0.33
-    } else if c.is_ascii() {
-        font_size * 0.55
-    } else {
-        font_size * 1.0
+pub struct FontMetrics<'a> {
+    face: Option<ttf_parser::Face<'a>>,
+    units_per_em: f32,
+}
+
+impl<'a> FontMetrics<'a> {
+    pub fn new(font_bytes: &'a [u8]) -> Self {
+        if let Ok(face) = ttf_parser::Face::parse(font_bytes, 0) {
+            let units_per_em = face.units_per_em() as f32;
+            Self {
+                face: Some(face),
+                units_per_em,
+            }
+        } else {
+            Self {
+                face: None,
+                units_per_em: 1000.0,
+            }
+        }
+    }
+
+    pub fn char_width(&self, c: char, font_size: f32) -> f32 {
+        if let Some(ref face) = self.face {
+            if let Some(gid) = face.glyph_index(c) {
+                if let Some(adv) = face.glyph_hor_advance(gid) {
+                    return (adv as f32 / self.units_per_em) * font_size;
+                }
+            }
+        }
+        if c == ' ' {
+            font_size * 0.28
+        } else if c.is_ascii() {
+            font_size * 0.5
+        } else {
+            font_size * 0.95
+        }
+    }
+
+    pub fn str_width(&self, text: &str, font_size: f32) -> f32 {
+        text.chars().map(|c| self.char_width(c, font_size)).sum()
     }
 }
 
-fn wrap_text_line(text: &str, max_width: f32, font_size: f32) -> Vec<String> {
+fn wrap_text_line(text: &str, max_width: f32, font_size: f32, metrics: &FontMetrics) -> Vec<String> {
     if max_width <= 0.0 || text.is_empty() {
         return vec![text.to_string()];
     }
@@ -906,17 +955,14 @@ fn wrap_text_line(text: &str, max_width: f32, font_size: f32) -> Vec<String> {
     let mut current_width = 0.0f32;
 
     for word in text.split_inclusive(' ') {
-        let mut word_width = 0.0f32;
-        for c in word.chars() {
-            word_width += char_width(c, font_size);
-        }
+        let word_width = metrics.str_width(word, font_size);
 
         if current_width + word_width <= max_width || current_line.is_empty() {
             current_line.push_str(word);
             current_width += word_width;
         } else if word_width > max_width {
             for c in word.chars() {
-                let cw = char_width(c, font_size);
+                let cw = metrics.char_width(c, font_size);
                 if current_width + cw > max_width && !current_line.is_empty() {
                     lines.push(current_line);
                     current_line = String::new();
@@ -1120,17 +1166,26 @@ impl<'s> PageConversionCtx<'s> {
             page_width - start_x
         };
         let max_line_width = (max_x - start_x).max(100.0);
-        const INLINE_GAP: f32 = 25.55;
 
-        let floating_image_boxes: Vec<sdocx::Box2d<f64>> = floating_objects
+        let mut floating_image_boxes: Vec<sdocx::Box2d<f64>> = floating_objects
             .into_iter()
             .filter_map(|obj| match obj {
                 DocObject::Image(_) => Some(obj.object_base().rect),
                 _ => None,
             })
             .collect();
+        floating_image_boxes.sort_by(|a, b| {
+            a.min.y
+                .partial_cmp(&b.min.y)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let mut current_flow_bottom: Option<f32> = None;
+
+        let loaded_regular = get_loaded_font(false);
+        let loaded_bold = get_loaded_font(true);
+        let metrics_regular = FontMetrics::new(&loaded_regular.bytes);
+        let metrics_bold = FontMetrics::new(&loaded_bold.bytes);
 
         let full_text = opt_body_text.and_then(|bt| bt.raw_string()).unwrap_or("");
         let utf16_units: Vec<u16> = full_text.encode_utf16().collect();
@@ -1159,6 +1214,25 @@ impl<'s> PageConversionCtx<'s> {
         let mut page_inline_objs: Vec<&'a InlineObject> = inline_objects.into_iter().collect();
         page_inline_objs.sort_by_key(|io| io.index_in_text);
         let mut inline_idx = 0;
+
+        let resolve_collision = |cur_y: &mut f32| {
+            let mut collided = true;
+            while collided {
+                collided = false;
+                for bbox in &floating_image_boxes {
+                    let min_y = bbox.min.y as f32;
+                    let max_y = bbox.max.y as f32;
+                    let min_x = bbox.min.x as f32;
+                    let max_x_box = bbox.max.x as f32;
+                    if min_x < max_x && max_x_box > start_x {
+                        if *cur_y >= min_y - 15.0 && *cur_y < max_y {
+                            *cur_y = (*cur_y).max(max_y);
+                            collided = true;
+                        }
+                    }
+                }
+            }
+        };
 
         if !page_u16_slice.is_empty() {
             let mut line_start_in_slice = 0;
@@ -1195,16 +1269,6 @@ impl<'s> PageConversionCtx<'s> {
                         let [b, g, r, a] = opt_body_text
                             .map(|bt| bt.text_color_at(sub_doc_u16_pos))
                             .unwrap_or([37, 37, 37, 255]);
-                        for bbox in &floating_image_boxes {
-                            let min_y = bbox.min.y as f32;
-                            let max_y = bbox.max.y as f32;
-                            let min_x = bbox.min.x as f32;
-                            let max_x_box = bbox.max.x as f32;
-                            if min_x < max_x && max_x_box > start_x && cur_y >= min_y - 15.0 && cur_y < max_y {
-                                cur_y = max_y + INLINE_GAP;
-                                current_flow_bottom = Some(cur_y);
-                            }
-                        }
 
                         let sub_text = String::from_utf16_lossy(sub_u16);
                         let trimmed = sub_text.trim_end();
@@ -1218,10 +1282,12 @@ impl<'s> PageConversionCtx<'s> {
                             self.surface.set_stroke(None);
                             self.surface.set_fill(Some(fill));
 
-                            let wrapped_lines = wrap_text_line(trimmed, max_line_width, font_size_doc);
+                            let metrics = if is_bold { &metrics_bold } else { &metrics_regular };
+                            let wrapped_lines = wrap_text_line(trimmed, max_line_width, font_size_doc, metrics);
                             for wline in wrapped_lines {
                                 let wtrimmed = wline.trim_end();
                                 if !wtrimmed.is_empty() {
+                                    resolve_collision(&mut cur_y);
                                     self.surface.draw_text(
                                         Point::from_xy(start_x, cur_y + font_size_doc * 0.8),
                                         get_font(is_bold),
@@ -1274,7 +1340,7 @@ impl<'s> PageConversionCtx<'s> {
                                         err.log();
                                     }
                                 }
-                                cur_y = target_y + obj_h + INLINE_GAP;
+                                cur_y = target_y + obj_h + 10.0;
                                 current_flow_bottom = Some(cur_y);
                             }
                             sub_start = sub_end + 1;
@@ -1295,17 +1361,6 @@ impl<'s> PageConversionCtx<'s> {
                         .map(|bt| bt.text_color_at(line_doc_u16_pos))
                         .unwrap_or([37, 37, 37, 255]);
 
-                    for bbox in &floating_image_boxes {
-                        let min_y = bbox.min.y as f32;
-                        let max_y = bbox.max.y as f32;
-                        let min_x = bbox.min.x as f32;
-                        let max_x_box = bbox.max.x as f32;
-                        if min_x < max_x && max_x_box > start_x && cur_y >= min_y - 15.0 && cur_y < max_y {
-                            cur_y = max_y + INLINE_GAP;
-                            current_flow_bottom = Some(cur_y);
-                        }
-                    }
-
                     let line_text = String::from_utf16_lossy(line_u16);
                     let trimmed = line_text.trim_end();
                     if !trimmed.is_empty() {
@@ -1318,10 +1373,12 @@ impl<'s> PageConversionCtx<'s> {
                         self.surface.set_stroke(None);
                         self.surface.set_fill(Some(fill));
 
-                        let wrapped_lines = wrap_text_line(trimmed, max_line_width, font_size_doc);
+                        let metrics = if is_bold { &metrics_bold } else { &metrics_regular };
+                        let wrapped_lines = wrap_text_line(trimmed, max_line_width, font_size_doc, metrics);
                         for wline in wrapped_lines {
                             let wtrimmed = wline.trim_end();
                             if !wtrimmed.is_empty() {
+                                resolve_collision(&mut cur_y);
                                 self.surface.draw_text(
                                     Point::from_xy(start_x, cur_y + font_size_doc * 0.8),
                                     get_font(is_bold),
@@ -1335,7 +1392,8 @@ impl<'s> PageConversionCtx<'s> {
                             }
                         }
                     } else {
-                        // Empty line
+                        // Empty line (user pressed enter)
+                        resolve_collision(&mut cur_y);
                         cur_y += line_height;
                         current_flow_bottom = Some(cur_y);
                     }
@@ -1365,7 +1423,7 @@ impl<'s> PageConversionCtx<'s> {
             let mut shift_y = 0.0f32;
             if is_block {
                 if let Some(prev_bottom) = current_flow_bottom {
-                    let target_y = prev_bottom + INLINE_GAP;
+                    let target_y = prev_bottom + 10.0;
                     if min_y < target_y {
                         shift_y = target_y - min_y;
                     }
