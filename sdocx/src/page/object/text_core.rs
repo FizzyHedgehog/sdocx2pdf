@@ -375,13 +375,7 @@ impl Common {
             if span.span_base.span_type == SpanType::FontSize {
                 let start = span.span_base.start_pos;
                 let end = span.span_base.end_pos;
-                let matches = match span.span_base.interval_type {
-                    IntervalType::InclusiveExclusive => pos >= start && pos < end,
-                    IntervalType::InclusiveInclusive => pos >= start && pos <= end,
-                    IntervalType::ExclusiveExclusive => pos > start && pos < end,
-                    IntervalType::ExclusiveInclusive => pos > start && pos <= end,
-                };
-                if matches && span.bytes.len() >= 4 {
+                if pos >= start && pos < end && span.bytes.len() >= 4 {
                     let sz = f32::from_le_bytes([
                         span.bytes[0],
                         span.bytes[1],
@@ -403,13 +397,7 @@ impl Common {
             if span.span_base.span_type == SpanType::ForegroundColour {
                 let start = span.span_base.start_pos;
                 let end = span.span_base.end_pos;
-                let matches = match span.span_base.interval_type {
-                    IntervalType::InclusiveExclusive => pos >= start && pos < end,
-                    IntervalType::InclusiveInclusive => pos >= start && pos <= end,
-                    IntervalType::ExclusiveExclusive => pos > start && pos < end,
-                    IntervalType::ExclusiveInclusive => pos > start && pos <= end,
-                };
-                if matches && span.bytes.len() >= 4 {
+                if pos >= start && pos < end && span.bytes.len() >= 4 {
                     return [span.bytes[0], span.bytes[1], span.bytes[2], span.bytes[3]];
                 }
             }
@@ -422,13 +410,7 @@ impl Common {
             if span.span_base.span_type == SpanType::Bold {
                 let start = span.span_base.start_pos;
                 let end = span.span_base.end_pos;
-                let matches = match span.span_base.interval_type {
-                    IntervalType::InclusiveExclusive => pos >= start && pos < end,
-                    IntervalType::InclusiveInclusive => pos >= start && pos <= end,
-                    IntervalType::ExclusiveExclusive => pos > start && pos < end,
-                    IntervalType::ExclusiveInclusive => pos > start && pos <= end,
-                };
-                if matches {
+                if pos >= start && pos < end {
                     return true;
                 }
             }

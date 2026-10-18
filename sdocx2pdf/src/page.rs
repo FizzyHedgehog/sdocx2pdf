@@ -886,6 +886,59 @@ pub struct PageConversionCtx<'s> {
     pub surface: Surface<'s>,
 }
 
+fn char_width(c: char, font_size: f32) -> f32 {
+    if c == ' ' {
+        font_size * 0.33
+    } else if c.is_ascii() {
+        font_size * 0.55
+    } else {
+        font_size * 1.0
+    }
+}
+
+fn wrap_text_line(text: &str, max_width: f32, font_size: f32) -> Vec<String> {
+    if max_width <= 0.0 || text.is_empty() {
+        return vec![text.to_string()];
+    }
+
+    let mut lines = Vec::new();
+    let mut current_line = String::new();
+    let mut current_width = 0.0f32;
+
+    for word in text.split_inclusive(' ') {
+        let mut word_width = 0.0f32;
+        for c in word.chars() {
+            word_width += char_width(c, font_size);
+        }
+
+        if current_width + word_width <= max_width || current_line.is_empty() {
+            current_line.push_str(word);
+            current_width += word_width;
+        } else if word_width > max_width {
+            for c in word.chars() {
+                let cw = char_width(c, font_size);
+                if current_width + cw > max_width && !current_line.is_empty() {
+                    lines.push(current_line);
+                    current_line = String::new();
+                    current_width = 0.0;
+                }
+                current_line.push(c);
+                current_width += cw;
+            }
+        } else {
+            lines.push(current_line);
+            current_line = word.to_string();
+            current_width = word_width;
+        }
+    }
+
+    if !current_line.is_empty() {
+        lines.push(current_line);
+    }
+
+    lines
+}
+
 impl<'s> PageConversionCtx<'s> {
     pub fn new<'p>(
         page: &PageContent<'p>,
@@ -1032,6 +1085,7 @@ impl<'s> PageConversionCtx<'s> {
         );
     }
 
+    #[allow(unused_assignments)]
     pub fn draw_body_text_and_inline_objects<'a>(
         &mut self,
         opt_body_text: Option<&sdocx::page::object::text::Text>,
@@ -1048,12 +1102,22 @@ impl<'s> PageConversionCtx<'s> {
             1752.0 / 360.0
         };
 
-        let (left_m, top_m) = match opt_body_text {
-            Some(bt) => (bt.left_margin() * dp_scale, bt.top_margin() * dp_scale),
-            None => (0.0, 0.0),
+        let (left_m, top_m, right_m) = match opt_body_text {
+            Some(bt) => (
+                bt.left_margin() * dp_scale,
+                bt.top_margin() * dp_scale,
+                bt.right_margin() * dp_scale,
+            ),
+            None => (0.0, 0.0, 0.0),
         };
         let start_x = if left_m > 1.0 { left_m } else { 77.8667 };
         let mut cur_y = if top_m > 1.0 { top_m } else { 48.6667 };
+        let max_x = if right_m > 1.0 {
+            page_width - right_m
+        } else {
+            page_width - start_x
+        };
+        let max_line_width = (max_x - start_x).max(100.0);
         const INLINE_GAP: f32 = 25.55;
 
         let mut current_flow_bottom: Option<f32> = None;
@@ -1128,16 +1192,23 @@ impl<'s> PageConversionCtx<'s> {
                             };
                             self.surface.set_stroke(None);
                             self.surface.set_fill(Some(fill));
-                            self.surface.draw_text(
-                                Point::from_xy(start_x, cur_y + font_size_doc * 0.8),
-                                get_font(is_bold),
-                                font_size_doc,
-                                trimmed,
-                                false,
-                                TextDirection::Auto,
-                            );
-                            cur_y += line_height;
-                            current_flow_bottom = Some(cur_y);
+
+                            let wrapped_lines = wrap_text_line(trimmed, max_line_width, font_size_doc);
+                            for wline in wrapped_lines {
+                                let wtrimmed = wline.trim_end();
+                                if !wtrimmed.is_empty() {
+                                    self.surface.draw_text(
+                                        Point::from_xy(start_x, cur_y + font_size_doc * 0.8),
+                                        get_font(is_bold),
+                                        font_size_doc,
+                                        wtrimmed,
+                                        false,
+                                        TextDirection::Auto,
+                                    );
+                                    cur_y += line_height;
+                                    current_flow_bottom = Some(cur_y);
+                                }
+                            }
                         }
 
                         if sub_end < line_u16.len() {
@@ -1210,17 +1281,28 @@ impl<'s> PageConversionCtx<'s> {
                         };
                         self.surface.set_stroke(None);
                         self.surface.set_fill(Some(fill));
-                        self.surface.draw_text(
-                            Point::from_xy(start_x, cur_y + font_size_doc * 0.8),
-                            get_font(is_bold),
-                            font_size_doc,
-                            trimmed,
-                            false,
-                            TextDirection::Auto,
-                        );
+
+                        let wrapped_lines = wrap_text_line(trimmed, max_line_width, font_size_doc);
+                        for wline in wrapped_lines {
+                            let wtrimmed = wline.trim_end();
+                            if !wtrimmed.is_empty() {
+                                self.surface.draw_text(
+                                    Point::from_xy(start_x, cur_y + font_size_doc * 0.8),
+                                    get_font(is_bold),
+                                    font_size_doc,
+                                    wtrimmed,
+                                    false,
+                                    TextDirection::Auto,
+                                );
+                                cur_y += line_height;
+                                current_flow_bottom = Some(cur_y);
+                            }
+                        }
+                    } else {
+                        // Empty line
+                        cur_y += line_height;
+                        current_flow_bottom = Some(cur_y);
                     }
-                    cur_y += line_height;
-                    current_flow_bottom = Some(cur_y);
                 }
 
                 if line_end_in_slice < page_u16_slice.len() {
