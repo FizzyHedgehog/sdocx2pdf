@@ -35,11 +35,50 @@ impl Text {
         self.shape.raw_text_string()
     }
 
+    pub fn text_common(&self) -> Option<&crate::page::object::text_core::Common> {
+        self.shape.text_data.text_common.as_ref()
+    }
+
     pub fn inline_objects(&self) -> &[InlineObject] {
         match self.shape.text_data.text_common.as_ref() {
             Some(tc) => &tc.inline_objects[..],
             None => &[],
         }
+    }
+
+    pub fn section_data(&self) -> &[(u32, u32)] {
+        match self.text_common() {
+            Some(tc) => tc.section_data(),
+            None => &[],
+        }
+    }
+
+    pub fn left_margin(&self) -> f32 {
+        self.text_common().map(|tc| tc.left_margin()).unwrap_or(0.0)
+    }
+
+    pub fn top_margin(&self) -> f32 {
+        self.text_common().map(|tc| tc.top_margin()).unwrap_or(0.0)
+    }
+
+    pub fn right_margin(&self) -> f32 {
+        self.text_common().map(|tc| tc.right_margin()).unwrap_or(0.0)
+    }
+
+    pub fn bottom_margin(&self) -> f32 {
+        self.text_common().map(|tc| tc.bottom_margin()).unwrap_or(0.0)
+    }
+
+    pub fn font_size_at(&self, pos: u32) -> f32 {
+        self.text_common().map(|tc| tc.font_size_at(pos)).unwrap_or(15.0)
+    }
+
+    pub fn text_color_at(&self, pos: u32) -> [u8; 4] {
+        self.text_common().map(|tc| tc.text_color_at(pos)).unwrap_or([37, 37, 37, 255])
+    }
+
+    pub fn is_bold_at(&self, pos: u32) -> bool {
+        self.text_common().map(|tc| tc.is_bold_at(pos)).unwrap_or(false)
     }
 }
 

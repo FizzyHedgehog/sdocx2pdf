@@ -1,13 +1,20 @@
 use std::{
     collections::{BTreeSet, HashMap, hash_map::Entry},
     io::Read,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 use anyhow::Context;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use itertools::{Either, Itertools};
-use krilla::{color::rgb, geom::Transform, num::NormalizedF32, paint::Fill, surface::Surface};
+use krilla::{
+    color::rgb,
+    geom::{Point, Transform},
+    num::NormalizedF32,
+    paint::Fill,
+    surface::Surface,
+    text::{Font, TextDirection},
+};
 use log::{error, info, warn};
 use num::ToPrimitive;
 use ordered_float::OrderedFloat;
@@ -27,6 +34,82 @@ use crate::{
 };
 
 const A4_PORTRAIT_WIDTH_PT: f64 = 210.0 * 2.84526;
+
+static ROBOTO_REGULAR_BYTES: &[u8] = include_bytes!("../fonts/Roboto-Regular.ttf");
+static ROBOTO_BOLD_BYTES: &[u8] = include_bytes!("../fonts/Roboto-Bold.ttf");
+static FONT_REGULAR: OnceLock<Font> = OnceLock::new();
+static FONT_BOLD: OnceLock<Font> = OnceLock::new();
+
+fn get_font(is_bold: bool) -> Font {
+    let font_lock = if is_bold { &FONT_BOLD } else { &FONT_REGULAR };
+    font_lock
+        .get_or_init(|| {
+            let candidate_paths = if is_bold {
+                &[
+                    // Android (One UI & AOSP)
+                    "/system/fonts/SamsungOneKorean-Bold.ttf",
+                    "/system/fonts/NotoSansCJK-Bold.ttc",
+                    "/system/fonts/NotoSansKR-Bold.otf",
+                    "/system/fonts/NotoSansCJK-Regular.ttc",
+                    "/system/fonts/NotoSansKR-Regular.otf",
+                    "/system/fonts/SamsungSans-Regular.ttf",
+                    "/system/fonts/DroidSansFallback.ttf",
+                    // macOS
+                    "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
+                    "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+                    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+                    "/Library/Fonts/Arial Unicode.ttf",
+                    // Linux
+                    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+                    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+                    "/usr/share/fonts/truetype/nanum/NanumBarunGothicBold.ttf",
+                    "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+                    // Windows
+                    "C:\\Windows\\Fonts\\malgunbd.ttf",
+                    "C:\\Windows\\Fonts\\malgun.ttf",
+                ][..]
+            } else {
+                &[
+                    // Android (One UI & AOSP)
+                    "/system/fonts/SamsungOneKorean-Regular.ttf",
+                    "/system/fonts/NotoSansCJK-Regular.ttc",
+                    "/system/fonts/NotoSansKR-Regular.otf",
+                    "/system/fonts/SamsungSans-Regular.ttf",
+                    "/system/fonts/DroidSansFallback.ttf",
+                    // macOS
+                    "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
+                    "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+                    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+                    "/Library/Fonts/Arial Unicode.ttf",
+                    // Linux
+                    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+                    "/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf",
+                    "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+                    // Windows
+                    "C:\\Windows\\Fonts\\malgun.ttf",
+                    "C:\\Windows\\Fonts\\gulim.ttc",
+                ][..]
+            };
+
+            for path in candidate_paths {
+                if let Ok(bytes) = std::fs::read(path) {
+                    if let Some(font) = Font::new(bytes.into(), 0) {
+                        return font;
+                    }
+                }
+            }
+
+            let embedded_bytes = if is_bold {
+                ROBOTO_BOLD_BYTES
+            } else {
+                ROBOTO_REGULAR_BYTES
+            };
+            Font::new(embedded_bytes.into(), 0).expect("embedded fallback font must load")
+        })
+        .clone()
+}
 
 /// Stores loaded PDFs for embeds.
 pub struct EmbedMap<'e> {
@@ -939,18 +1022,227 @@ impl<'s> PageConversionCtx<'s> {
         marker_width_mul: f32,
         media: &mut MediaStorage,
     ) {
-        let mut current_flow_bottom: Option<f32> = None;
+        self.draw_body_text_and_inline_objects(
+            None,
+            0,
+            inline_objects,
+            pen_width_mul,
+            marker_width_mul,
+            media,
+        );
+    }
+
+    pub fn draw_body_text_and_inline_objects<'a>(
+        &mut self,
+        opt_body_text: Option<&sdocx::page::object::text::Text>,
+        page_index: usize,
+        inline_objects: impl IntoIterator<Item = &'a InlineObject>,
+        pen_width_mul: f32,
+        marker_width_mul: f32,
+        media: &mut MediaStorage,
+    ) {
+        let page_width = self.input_box.width() as f32;
+        let dp_scale = if page_width > 0.0 {
+            page_width / 360.0
+        } else {
+            1752.0 / 360.0
+        };
+
+        let (left_m, top_m) = match opt_body_text {
+            Some(bt) => (bt.left_margin() * dp_scale, bt.top_margin() * dp_scale),
+            None => (0.0, 0.0),
+        };
+        let start_x = if left_m > 1.0 { left_m } else { 77.8667 };
+        let mut cur_y = if top_m > 1.0 { top_m } else { 48.6667 };
         const INLINE_GAP: f32 = 25.55;
 
-        for inline_obj in inline_objects {
-            let bbox = inline_obj.object.object_base().rect;
+        let mut current_flow_bottom: Option<f32> = None;
+
+        let full_text = opt_body_text.and_then(|bt| bt.raw_string()).unwrap_or("");
+        let utf16_units: Vec<u16> = full_text.encode_utf16().collect();
+        let section_data = opt_body_text.map(|bt| bt.section_data()).unwrap_or(&[]);
+
+        let (page_u16_slice, page_start_u16) = if !section_data.is_empty() {
+            if page_index < section_data.len() {
+                let (sec_start, sec_count) = section_data[page_index];
+                let start_u16 = (sec_start as usize).min(utf16_units.len());
+                let end_u16 = (start_u16 + sec_count as usize).min(utf16_units.len());
+                (&utf16_units[start_u16..end_u16], start_u16)
+            } else {
+                (&[][..], 0)
+            }
+        } else if page_index == 0 && !utf16_units.is_empty() {
+            (&utf16_units[..], 0)
+        } else {
+            (&[][..], 0)
+        };
+
+        let mut page_inline_objs: Vec<&'a InlineObject> = inline_objects.into_iter().collect();
+        page_inline_objs.sort_by_key(|io| io.index_in_text);
+        let mut inline_idx = 0;
+
+        if !page_u16_slice.is_empty() {
+            let mut line_start_in_slice = 0;
+            while line_start_in_slice <= page_u16_slice.len() {
+                let line_end_in_slice = page_u16_slice[line_start_in_slice..]
+                    .iter()
+                    .position(|&c| c == 0x000A)
+                    .map(|pos| line_start_in_slice + pos)
+                    .unwrap_or(page_u16_slice.len());
+
+                let line_u16 = &page_u16_slice[line_start_in_slice..line_end_in_slice];
+                let line_doc_u16_pos = (page_start_u16 + line_start_in_slice) as u32;
+
+                if line_u16.iter().any(|&c| c == 0xFFFC) {
+                    let mut sub_start = 0;
+                    while sub_start <= line_u16.len() {
+                        let sub_end = line_u16[sub_start..]
+                            .iter()
+                            .position(|&c| c == 0xFFFC)
+                            .map(|pos| sub_start + pos)
+                            .unwrap_or(line_u16.len());
+
+                        let sub_u16 = &line_u16[sub_start..sub_end];
+                        let sub_doc_u16_pos = line_doc_u16_pos + sub_start as u32;
+
+                        let font_size_sp = opt_body_text
+                            .map(|bt| bt.font_size_at(sub_doc_u16_pos))
+                            .unwrap_or(15.0);
+                        let font_size_doc = font_size_sp * dp_scale;
+                        let line_height = font_size_doc * 1.35;
+                        let is_bold = opt_body_text
+                            .map(|bt| bt.is_bold_at(sub_doc_u16_pos))
+                            .unwrap_or(false);
+                        let [b, g, r, a] = opt_body_text
+                            .map(|bt| bt.text_color_at(sub_doc_u16_pos))
+                            .unwrap_or([37, 37, 37, 255]);
+
+                        let sub_text = String::from_utf16_lossy(sub_u16);
+                        let trimmed = sub_text.trim_end();
+                        if !trimmed.is_empty() {
+                            let fill = Fill {
+                                paint: rgb::Color::new(r, g, b).into(),
+                                opacity: NormalizedF32::new(a as f32 / 255.0)
+                                    .unwrap_or(NormalizedF32::ONE),
+                                ..Fill::default()
+                            };
+                            self.surface.set_stroke(None);
+                            self.surface.set_fill(Some(fill));
+                            self.surface.draw_text(
+                                Point::from_xy(start_x, cur_y + font_size_doc * 0.8),
+                                get_font(is_bold),
+                                font_size_doc,
+                                trimmed,
+                                false,
+                                TextDirection::Auto,
+                            );
+                            cur_y += line_height;
+                            current_flow_bottom = Some(cur_y);
+                        }
+
+                        if sub_end < line_u16.len() {
+                            // Consuming inline object placeholder (0xFFFC)
+                            if inline_idx < page_inline_objs.len() {
+                                let io = page_inline_objs[inline_idx];
+                                inline_idx += 1;
+                                let bbox = io.object.object_base().rect;
+                                let obj_y = bbox.min.y as f32;
+                                let obj_h = bbox.height() as f32;
+
+                                let target_y = if let Some(prev) = current_flow_bottom {
+                                    if prev > obj_y { prev } else { obj_y }
+                                } else {
+                                    obj_y
+                                };
+                                let shift = target_y - obj_y;
+
+                                if shift.abs() > 0.01 {
+                                    self.surface
+                                        .push_transform(&Transform::from_translate(0.0, shift));
+                                    if let Err(err) = self.draw_single_object(
+                                        &io.object,
+                                        pen_width_mul,
+                                        marker_width_mul,
+                                        media,
+                                    ) {
+                                        err.log();
+                                    }
+                                    self.surface.pop();
+                                } else {
+                                    if let Err(err) = self.draw_single_object(
+                                        &io.object,
+                                        pen_width_mul,
+                                        marker_width_mul,
+                                        media,
+                                    ) {
+                                        err.log();
+                                    }
+                                }
+                                cur_y = target_y + obj_h + INLINE_GAP;
+                                current_flow_bottom = Some(cur_y);
+                            }
+                            sub_start = sub_end + 1;
+                        } else {
+                            break;
+                        }
+                    }
+                } else {
+                    let font_size_sp = opt_body_text
+                        .map(|bt| bt.font_size_at(line_doc_u16_pos))
+                        .unwrap_or(15.0);
+                    let font_size_doc = font_size_sp * dp_scale;
+                    let line_height = font_size_doc * 1.35;
+                    let is_bold = opt_body_text
+                        .map(|bt| bt.is_bold_at(line_doc_u16_pos))
+                        .unwrap_or(false);
+                    let [b, g, r, a] = opt_body_text
+                        .map(|bt| bt.text_color_at(line_doc_u16_pos))
+                        .unwrap_or([37, 37, 37, 255]);
+
+                    let line_text = String::from_utf16_lossy(line_u16);
+                    let trimmed = line_text.trim_end();
+                    if !trimmed.is_empty() {
+                        let fill = Fill {
+                            paint: rgb::Color::new(r, g, b).into(),
+                            opacity: NormalizedF32::new(a as f32 / 255.0)
+                                .unwrap_or(NormalizedF32::ONE),
+                            ..Fill::default()
+                        };
+                        self.surface.set_stroke(None);
+                        self.surface.set_fill(Some(fill));
+                        self.surface.draw_text(
+                            Point::from_xy(start_x, cur_y + font_size_doc * 0.8),
+                            get_font(is_bold),
+                            font_size_doc,
+                            trimmed,
+                            false,
+                            TextDirection::Auto,
+                        );
+                    }
+                    cur_y += line_height;
+                    current_flow_bottom = Some(cur_y);
+                }
+
+                if line_end_in_slice < page_u16_slice.len() {
+                    line_start_in_slice = line_end_in_slice + 1;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // Process any remaining inline objects (or if no text was present on this page)
+        while inline_idx < page_inline_objs.len() {
+            let io = page_inline_objs[inline_idx];
+            inline_idx += 1;
+            let bbox = io.object.object_base().rect;
             let min_y = bbox.min.y as f32;
             let height = bbox.height() as f32;
 
             let is_block = matches!(
-                inline_obj.layout_option,
+                io.layout_option,
                 Some(InTextLayoutOption::Block)
-            ) || inline_obj.layout_option.is_none();
+            ) || io.layout_option.is_none();
 
             let mut shift_y = 0.0f32;
             if is_block {
@@ -966,7 +1258,7 @@ impl<'s> PageConversionCtx<'s> {
                 self.surface
                     .push_transform(&Transform::from_translate(0.0, shift_y));
                 if let Err(err) = self.draw_single_object(
-                    &inline_obj.object,
+                    &io.object,
                     pen_width_mul,
                     marker_width_mul,
                     media,
@@ -977,7 +1269,7 @@ impl<'s> PageConversionCtx<'s> {
                 current_flow_bottom = Some(min_y + shift_y + height);
             } else {
                 if let Err(err) = self.draw_single_object(
-                    &inline_obj.object,
+                    &io.object,
                     pen_width_mul,
                     marker_width_mul,
                     media,

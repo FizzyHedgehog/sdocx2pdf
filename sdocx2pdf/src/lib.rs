@@ -57,7 +57,7 @@ pub fn convert_sdocx_to_pdf(
 
     let multi_progress = MultiProgress::new();
 
-    for page in pages {
+    for (page_index, page) in pages.into_iter().enumerate() {
         let output_size = page.output_size();
         let mut pdf_page = pdf.start_page_with(PageSettings::new(
             Size::from_wh(output_size.width as f32, output_size.height as f32)
@@ -97,7 +97,9 @@ pub fn convert_sdocx_to_pdf(
             }
         }
 
-        page_ctx.draw_inline_objects(
+        page_ctx.draw_body_text_and_inline_objects(
+            Some(document.body_text()),
+            page_index,
             page.inline_objects(),
             pen_multiplier,
             marker_multiplier,

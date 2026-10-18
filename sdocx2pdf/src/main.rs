@@ -13,7 +13,7 @@ use krilla::{
     metadata::Metadata,
     page::PageSettings,
 };
-use log::{info, warn};
+use log::info;
 use sdocx::{Document, DocumentError, MediaStorage};
 
 use sdocx2pdf::{
@@ -146,7 +146,7 @@ fn create_document_pdf(
     if let Some(s) = document.body_text().raw_string()
         && s.chars().any(|c| !c.is_whitespace() && c != '\u{FFFC}')
     {
-        warn!("Ignoring typed text in document body");
+        info!("Rendering typed text in document body");
     }
 
     let embed_map = EmbedMap::new(document, media_storage)?;
@@ -172,7 +172,7 @@ fn create_document_pdf(
         None
     };
 
-    for page in pages {
+    for (page_index, page) in pages.into_iter().enumerate() {
         pages_bar.as_ref().inspect(|pb| pb.inc(1));
 
         // todo: Move page-internal conversion logic into `page`
@@ -235,7 +235,9 @@ fn create_document_pdf(
             page_ctx.surface.pop();
         }
 
-        page_ctx.draw_inline_objects(
+        page_ctx.draw_body_text_and_inline_objects(
+            Some(document.body_text()),
+            page_index,
             page.inline_objects(),
             args.pen_width_multiplier,
             args.marker_width_multiplier,

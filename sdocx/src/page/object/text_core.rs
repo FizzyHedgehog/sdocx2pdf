@@ -28,8 +28,8 @@ enum Gravity {
 
 impl_try_from_for_optional_from!(Gravity, u8, from_u8, pub InvalidGravityError);
 
-#[derive(Debug, FromPrimitive)]
-enum SpanType {
+#[derive(Debug, FromPrimitive, Clone, Copy, PartialEq, Eq)]
+pub enum SpanType {
     /// `TYPE_NONE`
     None = 0,
     /// `TYPE_FOREGROUND_COLOR`
@@ -69,7 +69,7 @@ enum SpanType {
 impl_try_from_for_optional_from!(SpanType, u32, from_u32, pub InvalidSpanTypeError);
 
 #[derive(Debug, FromPrimitive)]
-enum IntervalType {
+pub enum IntervalType {
     //// `SPAN_INCLUSIVE_EXCLUSIVE`
     InclusiveExclusive = 0,
     /// `SPAN_INCLUSIVE_INCLUSIVE`
@@ -83,12 +83,11 @@ enum IntervalType {
 impl_try_from_for_optional_from!(IntervalType, u32, from_u32, pub InvalidIntervalTypeError);
 
 #[derive(Debug)]
-#[expect(dead_code)]
-struct SpanBase {
-    span_type: SpanType,
-    start_pos: u32,
-    end_pos: u32,
-    interval_type: IntervalType,
+pub struct SpanBase {
+    pub span_type: SpanType,
+    pub start_pos: u32,
+    pub end_pos: u32,
+    pub interval_type: IntervalType,
 }
 
 #[derive(Error, Debug)]
@@ -103,10 +102,9 @@ pub enum SpanParseError {
 }
 
 #[derive(Debug)]
-#[expect(dead_code)]
-struct Span {
-    span_base: SpanBase,
-    bytes: Vec<u8>,
+pub struct Span {
+    pub span_base: SpanBase,
+    pub bytes: Vec<u8>,
 }
 
 impl<R: Read> TryParse<R> for Span {
@@ -133,7 +131,7 @@ impl<R: Read> TryParse<R> for Span {
 }
 
 #[derive(Debug, FromPrimitive)]
-enum ParagraphType {
+pub enum ParagraphType {
     /// `TYPE_INDENTLEVEL`
     IndentLevel = 2,
     /// `TYPE_ALIGN`
@@ -156,11 +154,10 @@ enum ParagraphType {
 impl_try_from_for_optional_from!(ParagraphType, u32, from_u32, pub InvalidParagraphTypeError);
 
 #[derive(Debug)]
-#[expect(dead_code)]
-struct ParagraphBase {
-    paragraph_type: ParagraphType,
-    start_pos: u32,
-    end_pos: u32,
+pub struct ParagraphBase {
+    pub paragraph_type: ParagraphType,
+    pub start_pos: u32,
+    pub end_pos: u32,
 }
 
 #[derive(Error, Debug)]
@@ -174,10 +171,9 @@ pub enum ParagraphParseError {
 }
 
 #[derive(Debug)]
-#[expect(dead_code)]
-struct Paragraph {
-    paragraph_base: ParagraphBase,
-    bytes: Vec<u8>,
+pub struct Paragraph {
+    pub paragraph_base: ParagraphBase,
+    pub bytes: Vec<u8>,
 }
 
 impl<R: Read> TryParse<R> for Paragraph {
@@ -311,6 +307,133 @@ pub struct Common {
 impl Common {
     pub fn raw_string(&self) -> &str {
         &self.text
+    }
+
+    pub fn section_data(&self) -> &[(u32, u32)] {
+        &self.section_data
+    }
+
+    pub fn left_margin(&self) -> f32 {
+        self.left_margin
+    }
+
+    pub fn top_margin(&self) -> f32 {
+        self.top_margin
+    }
+
+    pub fn right_margin(&self) -> f32 {
+        self.right_margin
+    }
+
+    pub fn bottom_margin(&self) -> f32 {
+        self.bottom_margin
+    }
+
+    pub fn default_font_size(&self) -> Option<f32> {
+        for span in &self.spans {
+            if span.span_base.span_type == SpanType::FontSize && span.bytes.len() >= 4 {
+                let val = f32::from_le_bytes([
+                    span.bytes[0],
+                    span.bytes[1],
+                    span.bytes[2],
+                    span.bytes[3],
+                ]);
+                if val > 0.0 {
+                    return Some(val);
+                }
+            }
+        }
+        None
+    }
+
+    pub fn default_text_color(&self) -> Option<[u8; 4]> {
+        for span in &self.spans {
+            if span.span_base.span_type == SpanType::ForegroundColour && span.bytes.len() >= 4 {
+                return Some([span.bytes[0], span.bytes[1], span.bytes[2], span.bytes[3]]);
+            }
+        }
+        None
+    }
+
+    pub fn is_bold(&self) -> bool {
+        self.spans
+            .iter()
+            .any(|s| s.span_base.span_type == SpanType::Bold)
+    }
+
+    pub fn paragraphs(&self) -> &[Paragraph] {
+        &self.paragraphs
+    }
+
+    pub fn spans(&self) -> &[Span] {
+        &self.spans
+    }
+
+    pub fn font_size_at(&self, pos: u32) -> f32 {
+        let default_sz = self.default_font_size().unwrap_or(15.0);
+        for span in &self.spans {
+            if span.span_base.span_type == SpanType::FontSize {
+                let start = span.span_base.start_pos;
+                let end = span.span_base.end_pos;
+                let matches = match span.span_base.interval_type {
+                    IntervalType::InclusiveExclusive => pos >= start && pos < end,
+                    IntervalType::InclusiveInclusive => pos >= start && pos <= end,
+                    IntervalType::ExclusiveExclusive => pos > start && pos < end,
+                    IntervalType::ExclusiveInclusive => pos > start && pos <= end,
+                };
+                if matches && span.bytes.len() >= 4 {
+                    let sz = f32::from_le_bytes([
+                        span.bytes[0],
+                        span.bytes[1],
+                        span.bytes[2],
+                        span.bytes[3],
+                    ]);
+                    if sz > 0.0 {
+                        return sz;
+                    }
+                }
+            }
+        }
+        default_sz
+    }
+
+    pub fn text_color_at(&self, pos: u32) -> [u8; 4] {
+        let default_color = self.default_text_color().unwrap_or([37, 37, 37, 255]);
+        for span in &self.spans {
+            if span.span_base.span_type == SpanType::ForegroundColour {
+                let start = span.span_base.start_pos;
+                let end = span.span_base.end_pos;
+                let matches = match span.span_base.interval_type {
+                    IntervalType::InclusiveExclusive => pos >= start && pos < end,
+                    IntervalType::InclusiveInclusive => pos >= start && pos <= end,
+                    IntervalType::ExclusiveExclusive => pos > start && pos < end,
+                    IntervalType::ExclusiveInclusive => pos > start && pos <= end,
+                };
+                if matches && span.bytes.len() >= 4 {
+                    return [span.bytes[0], span.bytes[1], span.bytes[2], span.bytes[3]];
+                }
+            }
+        }
+        default_color
+    }
+
+    pub fn is_bold_at(&self, pos: u32) -> bool {
+        for span in &self.spans {
+            if span.span_base.span_type == SpanType::Bold {
+                let start = span.span_base.start_pos;
+                let end = span.span_base.end_pos;
+                let matches = match span.span_base.interval_type {
+                    IntervalType::InclusiveExclusive => pos >= start && pos < end,
+                    IntervalType::InclusiveInclusive => pos >= start && pos <= end,
+                    IntervalType::ExclusiveExclusive => pos > start && pos < end,
+                    IntervalType::ExclusiveInclusive => pos > start && pos <= end,
+                };
+                if matches {
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
 
