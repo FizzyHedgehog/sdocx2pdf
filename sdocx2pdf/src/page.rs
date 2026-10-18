@@ -35,8 +35,9 @@ use crate::{
 
 const A4_PORTRAIT_WIDTH_PT: f64 = 210.0 * 2.84526;
 
-static ROBOTO_REGULAR_BYTES: &[u8] = include_bytes!("../fonts/Roboto-Regular.ttf");
-static ROBOTO_BOLD_BYTES: &[u8] = include_bytes!("../fonts/Roboto-Bold.ttf");
+static NANUM_REGULAR_BYTES: &[u8] = include_bytes!("../fonts/NanumBarunGothic-Regular.ttf");
+static NANUM_BOLD_BYTES: &[u8] = include_bytes!("../fonts/NanumBarunGothic-Bold.ttf");
+
 pub struct LoadedFont {
     pub font: Font,
     pub bytes: Arc<Vec<u8>>,
@@ -45,124 +46,16 @@ pub struct LoadedFont {
 static LOADED_REGULAR: OnceLock<LoadedFont> = OnceLock::new();
 static LOADED_BOLD: OnceLock<LoadedFont> = OnceLock::new();
 
-fn find_korean_font_from_fonts_xml() -> Option<String> {
-    for xml_path in &["/system/etc/fonts.xml", "/system/etc/system_fonts.xml", "/system/etc/font_fallback.xml"] {
-        if let Ok(content) = std::fs::read_to_string(xml_path) {
-            if let Some(ko_idx) = content.find("lang=\"ko\"") {
-                let slice = &content[ko_idx..];
-                if let Some(font_tag) = slice.find("<font") {
-                    let font_slice = &slice[font_tag..];
-                    if let (Some(start), Some(end)) = (font_slice.find('>'), font_slice.find("</font>")) {
-                        let file_name = font_slice[start + 1..end].trim();
-                        let full_path = format!("/system/fonts/{}", file_name);
-                        if std::path::Path::new(&full_path).exists() {
-                            return Some(full_path);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
 pub fn get_loaded_font(is_bold: bool) -> &'static LoadedFont {
     let font_lock = if is_bold { &LOADED_BOLD } else { &LOADED_REGULAR };
     font_lock.get_or_init(|| {
-        let mut candidate_paths: Vec<String> = Vec::new();
-
-        if let Some(xml_font) = find_korean_font_from_fonts_xml() {
-            candidate_paths.push(xml_font);
-        }
-
-        let static_paths = if is_bold {
-            &[
-                // Android (One UI, AOSP, MIUI, ColorOS)
-                "/system/fonts/NotoSansKR-Bold.ttf",
-                "/system/fonts/NotoSansKR-Bold.otf",
-                "/system/fonts/NotoSansCJK-Bold.ttc",
-                "/system/fonts/NotoSansCJK.ttc",
-                "/system/fonts/NotoSansCJK-VF.otf.ttc",
-                "/system/fonts/NotoSansCJK-VF.ttc",
-                "/system/fonts/SamsungOneKorean-Bold.ttf",
-                "/system/fonts/SamsungOne-Bold.ttf",
-                "/system/fonts/SECRobotoLight-Bold.ttf",
-                "/system/fonts/NotoSansKR-Regular.ttf",
-                "/system/fonts/NotoSansKR-Regular.otf",
-                "/system/fonts/NotoSansCJK-Regular.ttc",
-                "/system/fonts/SamsungOneKorean-Regular.ttf",
-                "/system/fonts/SamsungOne-Regular.ttf",
-                "/system/fonts/SECRobotoLight-Regular.ttf",
-                "/system/fonts/SamsungSans-Regular.ttf",
-                "/system/fonts/DroidSansFallback.ttf",
-                // macOS
-                "/System/Library/Fonts/AppleSDGothicNeo.ttc",
-                "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
-                "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-                "/Library/Fonts/Arial Unicode.ttf",
-                // Linux
-                "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-                "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-                "/usr/share/fonts/truetype/nanum/NanumBarunGothicBold.ttf",
-                "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
-                // Windows
-                "C:\\Windows\\Fonts\\malgunbd.ttf",
-                "C:\\Windows\\Fonts\\malgun.ttf",
-            ][..]
-        } else {
-            &[
-                // Android (One UI, AOSP, MIUI, ColorOS)
-                "/system/fonts/NotoSansKR-Regular.ttf",
-                "/system/fonts/NotoSansKR-Regular.otf",
-                "/system/fonts/NotoSansCJK-Regular.ttc",
-                "/system/fonts/NotoSansCJK.ttc",
-                "/system/fonts/NotoSansCJK-VF.otf.ttc",
-                "/system/fonts/NotoSansCJK-VF.ttc",
-                "/system/fonts/SamsungOneKorean-Regular.ttf",
-                "/system/fonts/SamsungOne-Regular.ttf",
-                "/system/fonts/SECRobotoLight-Regular.ttf",
-                "/system/fonts/SamsungSans-Regular.ttf",
-                "/system/fonts/DroidSansFallback.ttf",
-                // macOS
-                "/System/Library/Fonts/AppleSDGothicNeo.ttc",
-                "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
-                "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-                "/Library/Fonts/Arial Unicode.ttf",
-                // Linux
-                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-                "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-                "/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf",
-                "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
-                // Windows
-                "C:\\Windows\\Fonts\\malgun.ttf",
-                "C:\\Windows\\Fonts\\gulim.ttc",
-            ][..]
-        };
-
-        for p in static_paths {
-            candidate_paths.push(p.to_string());
-        }
-
-        for path in &candidate_paths {
-            if let Ok(bytes) = std::fs::read(path) {
-                let arc_bytes = Arc::new(bytes);
-                if let Some(font) = Font::new(arc_bytes.clone().into(), 0) {
-                    return LoadedFont {
-                        font,
-                        bytes: arc_bytes,
-                    };
-                }
-            }
-        }
-
         let embedded_bytes = if is_bold {
-            ROBOTO_BOLD_BYTES
+            NANUM_BOLD_BYTES
         } else {
-            ROBOTO_REGULAR_BYTES
+            NANUM_REGULAR_BYTES
         };
         let arc_bytes = Arc::new(embedded_bytes.to_vec());
-        let font = Font::new(arc_bytes.clone().into(), 0).expect("embedded fallback font must load");
+        let font = Font::new(arc_bytes.clone().into(), 0).expect("embedded NanumBarunGothic must load");
         LoadedFont {
             font,
             bytes: arc_bytes,
@@ -997,7 +890,7 @@ fn wrap_text_line(text: &str, max_width: f32, font_size: f32, metrics: &FontMetr
         return vec![text.to_string()];
     }
 
-    let wrap_limit = max_width + 15.0;
+    let wrap_limit = max_width + 25.0;
     let mut lines = Vec::new();
     let mut current_line = String::new();
     let mut current_width = 0.0f32;
@@ -1274,7 +1167,7 @@ impl<'s> PageConversionCtx<'s> {
                     let max_x_box = bbox.max.x as f32;
                     if min_x < max_x && max_x_box > start_x {
                         if *cur_y >= min_y - 15.0 && *cur_y < max_y {
-                            *cur_y = (*cur_y).max(max_y);
+                            *cur_y = (*cur_y).max(max_y + 35.0);
                             collided = true;
                         }
                     }
