@@ -45,17 +45,54 @@ pub struct LoadedFont {
 static LOADED_REGULAR: OnceLock<LoadedFont> = OnceLock::new();
 static LOADED_BOLD: OnceLock<LoadedFont> = OnceLock::new();
 
+fn find_korean_font_from_fonts_xml() -> Option<String> {
+    for xml_path in &["/system/etc/fonts.xml", "/system/etc/system_fonts.xml", "/system/etc/font_fallback.xml"] {
+        if let Ok(content) = std::fs::read_to_string(xml_path) {
+            if let Some(ko_idx) = content.find("lang=\"ko\"") {
+                let slice = &content[ko_idx..];
+                if let Some(font_tag) = slice.find("<font") {
+                    let font_slice = &slice[font_tag..];
+                    if let (Some(start), Some(end)) = (font_slice.find('>'), font_slice.find("</font>")) {
+                        let file_name = font_slice[start + 1..end].trim();
+                        let full_path = format!("/system/fonts/{}", file_name);
+                        if std::path::Path::new(&full_path).exists() {
+                            return Some(full_path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 pub fn get_loaded_font(is_bold: bool) -> &'static LoadedFont {
     let font_lock = if is_bold { &LOADED_BOLD } else { &LOADED_REGULAR };
     font_lock.get_or_init(|| {
-        let candidate_paths = if is_bold {
+        let mut candidate_paths: Vec<String> = Vec::new();
+
+        if let Some(xml_font) = find_korean_font_from_fonts_xml() {
+            candidate_paths.push(xml_font);
+        }
+
+        let static_paths = if is_bold {
             &[
-                // Android (One UI & AOSP)
-                "/system/fonts/SamsungOneKorean-Bold.ttf",
-                "/system/fonts/NotoSansCJK-Bold.ttc",
+                // Android (One UI, AOSP, MIUI, ColorOS)
+                "/system/fonts/NotoSansKR-Bold.ttf",
                 "/system/fonts/NotoSansKR-Bold.otf",
-                "/system/fonts/NotoSansCJK-Regular.ttc",
+                "/system/fonts/NotoSansCJK-Bold.ttc",
+                "/system/fonts/NotoSansCJK.ttc",
+                "/system/fonts/NotoSansCJK-VF.otf.ttc",
+                "/system/fonts/NotoSansCJK-VF.ttc",
+                "/system/fonts/SamsungOneKorean-Bold.ttf",
+                "/system/fonts/SamsungOne-Bold.ttf",
+                "/system/fonts/SECRobotoLight-Bold.ttf",
+                "/system/fonts/NotoSansKR-Regular.ttf",
                 "/system/fonts/NotoSansKR-Regular.otf",
+                "/system/fonts/NotoSansCJK-Regular.ttc",
+                "/system/fonts/SamsungOneKorean-Regular.ttf",
+                "/system/fonts/SamsungOne-Regular.ttf",
+                "/system/fonts/SECRobotoLight-Regular.ttf",
                 "/system/fonts/SamsungSans-Regular.ttf",
                 "/system/fonts/DroidSansFallback.ttf",
                 // macOS
@@ -75,10 +112,16 @@ pub fn get_loaded_font(is_bold: bool) -> &'static LoadedFont {
             ][..]
         } else {
             &[
-                // Android (One UI & AOSP)
-                "/system/fonts/SamsungOneKorean-Regular.ttf",
-                "/system/fonts/NotoSansCJK-Regular.ttc",
+                // Android (One UI, AOSP, MIUI, ColorOS)
+                "/system/fonts/NotoSansKR-Regular.ttf",
                 "/system/fonts/NotoSansKR-Regular.otf",
+                "/system/fonts/NotoSansCJK-Regular.ttc",
+                "/system/fonts/NotoSansCJK.ttc",
+                "/system/fonts/NotoSansCJK-VF.otf.ttc",
+                "/system/fonts/NotoSansCJK-VF.ttc",
+                "/system/fonts/SamsungOneKorean-Regular.ttf",
+                "/system/fonts/SamsungOne-Regular.ttf",
+                "/system/fonts/SECRobotoLight-Regular.ttf",
                 "/system/fonts/SamsungSans-Regular.ttf",
                 "/system/fonts/DroidSansFallback.ttf",
                 // macOS
@@ -97,7 +140,11 @@ pub fn get_loaded_font(is_bold: bool) -> &'static LoadedFont {
             ][..]
         };
 
-        for path in candidate_paths {
+        for p in static_paths {
+            candidate_paths.push(p.to_string());
+        }
+
+        for path in &candidate_paths {
             if let Ok(bytes) = std::fs::read(path) {
                 let arc_bytes = Arc::new(bytes);
                 if let Some(font) = Font::new(arc_bytes.clone().into(), 0) {
@@ -934,9 +981,9 @@ impl<'a> FontMetrics<'a> {
         if c == ' ' {
             font_size * 0.28
         } else if c.is_ascii() {
-            font_size * 0.5
+            font_size * 0.48
         } else {
-            font_size * 0.95
+            font_size * 0.88
         }
     }
 
@@ -950,6 +997,7 @@ fn wrap_text_line(text: &str, max_width: f32, font_size: f32, metrics: &FontMetr
         return vec![text.to_string()];
     }
 
+    let wrap_limit = max_width + 15.0;
     let mut lines = Vec::new();
     let mut current_line = String::new();
     let mut current_width = 0.0f32;
@@ -957,13 +1005,13 @@ fn wrap_text_line(text: &str, max_width: f32, font_size: f32, metrics: &FontMetr
     for word in text.split_inclusive(' ') {
         let word_width = metrics.str_width(word, font_size);
 
-        if current_width + word_width <= max_width || current_line.is_empty() {
+        if current_width + word_width <= wrap_limit || current_line.is_empty() {
             current_line.push_str(word);
             current_width += word_width;
-        } else if word_width > max_width {
+        } else if word_width > wrap_limit {
             for c in word.chars() {
                 let cw = metrics.char_width(c, font_size);
-                if current_width + cw > max_width && !current_line.is_empty() {
+                if current_width + cw > wrap_limit && !current_line.is_empty() {
                     lines.push(current_line);
                     current_line = String::new();
                     current_width = 0.0;
