@@ -325,4 +325,9 @@ impl ObjectBase {
     pub fn uuid(&self) -> &str {
         &self.uuid
     }
+
+    /// Rotation of the object about its centre, in radians, if it is rotated.
+    pub fn angle(&self) -> Option<f32> {
+        self.angle
+    }
 }

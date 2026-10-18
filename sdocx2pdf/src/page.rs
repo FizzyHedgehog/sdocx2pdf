@@ -9,7 +9,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use itertools::{Either, Itertools};
 use krilla::{
     color::rgb,
-    geom::{Point, Transform},
+    geom::{PathBuilder, Point, Rect, Transform},
     num::NormalizedF32,
     paint::Fill,
     surface::Surface,
@@ -22,7 +22,7 @@ use sdocx::{
     DocObject, MediaStorage, euclid,
     page::{
         PdfPage as EmbeddedPdfPage,
-        object::{InTextLayoutOption, InlineObject},
+        object::{BulletKind, BulletStyle, InlineObject, TextStyle},
     },
 };
 use thiserror::Error;
@@ -33,7 +33,18 @@ use crate::{
     tool::{EventGroup, Tool},
 };
 
-const A4_PORTRAIT_WIDTH_PT: f64 = 210.0 * 2.84526;
+/// Width of the pages that Samsung Notes produces when it exports a note to PDF.
+///
+/// Samsung uses 600x848 rather than exact ISO A4 (595.28x841.89). Matching its choice means our
+/// output can be compared directly with Samsung's own exports, which is useful when checking
+/// rendering fidelity.
+const SAMSUNG_PAGE_WIDTH_PT: f64 = 600.0;
+
+/// Height of the pages that Samsung Notes produces when it exports a note to PDF.
+const SAMSUNG_PAGE_HEIGHT_PT: f64 = 848.0;
+
+/// Height-to-width ratio of Samsung Notes' exported pages (848/600, very close to √2).
+const SAMSUNG_PAGE_ASPECT: f64 = SAMSUNG_PAGE_HEIGHT_PT / SAMSUNG_PAGE_WIDTH_PT;
 
 static NANUM_REGULAR_BYTES: &[u8] = include_bytes!("../fonts/NanumBarunGothic-Regular.ttf");
 static NANUM_BOLD_BYTES: &[u8] = include_bytes!("../fonts/NanumBarunGothic-Bold.ttf");
@@ -45,6 +56,25 @@ pub struct LoadedFont {
 
 static LOADED_REGULAR: OnceLock<LoadedFont> = OnceLock::new();
 static LOADED_BOLD: OnceLock<LoadedFont> = OnceLock::new();
+static METRICS_REGULAR: OnceLock<FontMetrics<'static>> = OnceLock::new();
+static METRICS_BOLD: OnceLock<FontMetrics<'static>> = OnceLock::new();
+
+/// Glyph metrics for one of the embedded fonts, parsed once and reused.
+fn cached_metrics(is_bold: bool) -> &'static FontMetrics<'static> {
+    let lock = if is_bold {
+        &METRICS_BOLD
+    } else {
+        &METRICS_REGULAR
+    };
+
+    lock.get_or_init(|| {
+        FontMetrics::new(if is_bold {
+            NANUM_BOLD_BYTES
+        } else {
+            NANUM_REGULAR_BYTES
+        })
+    })
+}
 
 pub fn get_loaded_font(is_bold: bool) -> &'static LoadedFont {
     let font_lock = if is_bold { &LOADED_BOLD } else { &LOADED_REGULAR };
@@ -344,8 +374,9 @@ where
                 // Maximum count with minimum first-seen index.
                 .max_by_key(|(_, (count, first_seen_index))| (*count, !*first_seen_index))?;
 
-            // Use a scale that maps the smaller dimension of the modal page size to A4 width.
-            Some(pdf::Length::new(A4_PORTRAIT_WIDTH_PT) / sdocx::Length::new(w.min(h).0))
+            // Use a scale that maps the smaller dimension of the modal page size to the width of
+            // a Samsung Notes export page.
+            Some(pdf::Length::new(SAMSUNG_PAGE_WIDTH_PT) / sdocx::Length::new(w.min(h).0))
         }
     }
 }
@@ -369,14 +400,16 @@ fn compute_page_breaks(
 
             Some(bsm) => {
                 let output_page_inv_aspect_ratio = match bsm {
-                    // W:H = 1:√2 => H:W = √2:1
-                    BasicSplitMode::IsoPortrait => std::f64::consts::SQRT_2,
-                    // W:H = √2:1 => H:W = 1:√2
-                    BasicSplitMode::IsoLandscape => std::f64::consts::FRAC_1_SQRT_2,
+                    // Portrait pages, as tall as they are wide times the Samsung page aspect.
+                    BasicSplitMode::IsoPortrait => SAMSUNG_PAGE_ASPECT,
+                    // Landscape pages: the inverse.
+                    BasicSplitMode::IsoLandscape => 1.0 / SAMSUNG_PAGE_ASPECT,
                 };
 
                 // Pageless documents are vertical, so the height is arbitrary. Use the width and
-                // the ISO 216 aspect ratio to determine how tall the page slices should be.
+                // the page aspect ratio to determine how tall the page slices should be. With the
+                // scale that maps the document width to `SAMSUNG_PAGE_WIDTH_PT`, each slice comes
+                // out at exactly 600x848 (or 848x600 for landscape).
                 let slice_height = (page.width as f64) * output_page_inv_aspect_ratio;
 
                 // Round the slice count up so that if the slice height doesn't perfectly divide
@@ -639,7 +672,19 @@ pub fn split_document_into_pages<'d>(
     embed_cache: &EmbedMap<'d>,
     user_auto_split: bool,
     user_basic_split: Option<BasicSplitMode>,
+    user_no_split: bool,
 ) -> impl Iterator<Item = PageContent<'d>> {
+    // Samsung Notes always paginates pageless notes when it exports them, so we do the same by
+    // default. `--no-split` opts back in to a single long page.
+    let (auto_split, basic_split) = if user_no_split {
+        (false, None)
+    } else {
+        (
+            user_auto_split,
+            Some(user_basic_split.unwrap_or(BasicSplitMode::IsoPortrait)),
+        )
+    };
+
     let is_marked_pageless = matches!(doc.page_model(), sdocx::PageModel::Pageless);
 
     let page = match doc.pages().iter().exactly_one().ok() {
@@ -715,7 +760,7 @@ pub fn split_document_into_pages<'d>(
         // If there's no content, just use the whole page height because it's probably sane.
         .unwrap_or(page.height as f64);
 
-    let page_breaks = compute_page_breaks(page, user_auto_split, user_basic_split);
+    let page_breaks = compute_page_breaks(page, auto_split, basic_split);
 
     let content_slices = Vec::from_iter({
         let page_width = page.width as f64;
@@ -885,45 +930,328 @@ impl<'a> FontMetrics<'a> {
     }
 }
 
-fn wrap_text_line(text: &str, max_width: f32, font_size: f32, metrics: &FontMetrics) -> Vec<String> {
-    if max_width <= 0.0 || text.is_empty() {
-        return vec![text.to_string()];
+/// Gap between the bottom edge of a floating image and the top of the first line of text pushed
+/// below it, in document units (about 2.3pt for the usual 1752-unit-wide page).
+///
+/// Samsung Notes leaves only a couple of points here, and pushes as many text lines as will fit
+/// into the gap between two stacked images, so a large clearance would visibly move text that
+/// Samsung keeps in place.
+const FLOATING_IMAGE_CLEARANCE: f32 = 6.7;
+
+/// Slack used when checking whether a line of text overlaps a floating image, so that a line that
+/// merely grazes an image's edge is not pushed below it.
+const COLLISION_TOLERANCE: f32 = 2.5;
+
+/// How far below the baseline an underline sits, as a multiple of the font size.
+///
+/// Calibrated against Samsung Notes' own PDF export.
+const UNDERLINE_BELOW_BASELINE_EM: f32 = 0.19;
+
+/// How far above the baseline a strikethrough sits, as a multiple of the font size.
+///
+/// Calibrated against Samsung Notes' own PDF export.
+const STRIKETHROUGH_ABOVE_BASELINE_EM: f32 = 0.21;
+
+/// Distance from the top of a line box to the text baseline, as a multiple of the font size.
+///
+/// Samsung Notes places the baseline one full em below the top of the line, which we confirmed by
+/// comparing against its own PDF export.
+const BASELINE_EM: f32 = 1.0;
+
+/// Distance from the baseline to the top of the glyphs, as a multiple of the font size.
+const ASCENT_EM: f32 = 0.85;
+
+/// Distance from the baseline to the bottom of the glyphs, as a multiple of the font size.
+const DESCENT_EM: f32 = 0.18;
+
+/// Horizontal shear applied to italic text: the tangent of the slant angle (roughly 12°).
+const ITALIC_SKEW: f32 = 0.21;
+
+/// Width of one indentation level, as a multiple of the current font size.
+const INDENT_STEP_EM: f32 = 2.0;
+
+/// Line height as a multiple of the font size.
+const LINE_HEIGHT_FACTOR: f32 = 1.35;
+
+/// Builds a transform that rotates by `angle` (radians) about the centre of `rect`.
+fn rotation_about_centre(rect: &sdocx::Box2d<f64>, angle: f32) -> Transform {
+    let (sin, cos) = angle.sin_cos();
+    let cx = ((rect.min.x + rect.max.x) / 2.0) as f32;
+    let cy = ((rect.min.y + rect.max.y) / 2.0) as f32;
+
+    Transform::from_row(cos, sin, -sin, cos, cx - cx * cos + cy * sin, cy - cx * sin - cy * cos)
+}
+
+/// Wraps `text` into lines that fit within `max_width`, returning character-index ranges into
+/// `text` for each line. Words are kept intact unless a single word is wider than a whole line, in
+/// which case it is broken character by character.
+fn wrap_text_ranges(
+    text: &str,
+    max_width: f32,
+    font_size: f32,
+    metrics: &FontMetrics,
+) -> Vec<(usize, usize)> {
+    let chars: Vec<char> = text.chars().collect();
+
+    if max_width <= 0.0 || chars.is_empty() {
+        return vec![(0, chars.len())];
     }
 
+    // A little slack, so that we don't wrap a word just because our metrics are marginally wider
+    // than the ones the original app used.
     let wrap_limit = max_width + 25.0;
-    let mut lines = Vec::new();
-    let mut current_line = String::new();
+
+    let mut ranges = Vec::new();
+    let mut line_start = 0usize;
     let mut current_width = 0.0f32;
+    let mut i = 0usize;
 
-    for word in text.split_inclusive(' ') {
-        let word_width = metrics.str_width(word, font_size);
+    while i < chars.len() {
+        // A word is a run of characters ending with a space, and the space is kept.
+        let mut word_end = i;
+        while word_end < chars.len() && chars[word_end] != ' ' {
+            word_end += 1;
+        }
+        if word_end < chars.len() {
+            word_end += 1;
+        }
 
-        if current_width + word_width <= wrap_limit || current_line.is_empty() {
-            current_line.push_str(word);
-            current_width += word_width;
-        } else if word_width > wrap_limit {
-            for c in word.chars() {
-                let cw = metrics.char_width(c, font_size);
-                if current_width + cw > wrap_limit && !current_line.is_empty() {
-                    lines.push(current_line);
-                    current_line = String::new();
+        let word: String = chars[i..word_end].iter().collect();
+        let word_width = metrics.str_width(&word, font_size);
+        let line_is_empty = i == line_start;
+
+        if word_width > wrap_limit {
+            // The word can't fit on a line of its own, so break it up character by character. This
+            // also applies to an empty line, which would otherwise be allowed to overflow.
+            for k in i..word_end {
+                let char_width = metrics.char_width(chars[k], font_size);
+
+                if current_width + char_width > wrap_limit && k > line_start {
+                    ranges.push((line_start, k));
+                    line_start = k;
                     current_width = 0.0;
                 }
-                current_line.push(c);
-                current_width += cw;
+
+                current_width += char_width;
             }
+
+            i = word_end;
+        } else if current_width + word_width <= wrap_limit || line_is_empty {
+            current_width += word_width;
+            i = word_end;
         } else {
-            lines.push(current_line);
-            current_line = word.to_string();
-            current_width = word_width;
+            // Move the whole word onto the next line. Don't advance `i`, so that the word is
+            // measured again against the new (empty) line.
+            ranges.push((line_start, i));
+            line_start = i;
+            current_width = 0.0;
         }
     }
 
-    if !current_line.is_empty() {
-        lines.push(current_line);
+    if line_start < chars.len() {
+        ranges.push((line_start, chars.len()));
     }
 
-    lines
+    if ranges.is_empty() {
+        ranges.push((0, chars.len()));
+    }
+
+    ranges
+}
+
+/// Converts the character-index range `start..end` into a byte range in `text`.
+fn char_range(text: &str, start: usize, end: usize) -> (usize, usize) {
+    let byte_start = text
+        .char_indices()
+        .nth(start)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len());
+
+    let byte_end = text
+        .char_indices()
+        .nth(end)
+        .map(|(index, _)| index)
+        .unwrap_or(text.len());
+
+    (byte_start, byte_end.max(byte_start))
+}
+
+/// Builds a mapping from UTF-16 positions to byte offsets in `text`, where `base` is the UTF-16
+/// position of the first character.
+fn utf16_to_byte_offsets(text: &str, base: u32) -> Vec<(u32, usize)> {
+    let mut offsets = Vec::with_capacity(text.len() + 1);
+    offsets.push((base, 0));
+
+    let mut units = 0u32;
+    for (byte_index, ch) in text.char_indices() {
+        units += ch.len_utf16() as u32;
+        offsets.push((base + units, byte_index + ch.len_utf8()));
+    }
+
+    offsets
+}
+
+/// Looks up the byte offset for a UTF-16 position, clamping to the closest known offset.
+fn byte_offset_for_utf16(offsets: &[(u32, usize)], pos: u32) -> usize {
+    match offsets.binary_search_by_key(&pos, |&(unit, _)| unit) {
+        Ok(index) => offsets[index].1,
+        Err(index) => offsets
+            .get(index)
+            .or_else(|| offsets.last())
+            .map(|&(_, byte)| byte)
+            .unwrap_or(0),
+    }
+}
+
+/// A run of text drawn with a single style. Font sizes are in document units (already scaled).
+#[derive(Clone, Copy)]
+struct RunStyle {
+    font_size: f32,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    strikethrough: bool,
+    /// Raw document colour bytes (blue, green, red, alpha).
+    colour: [u8; 4],
+}
+
+impl RunStyle {
+    fn from_text_style(style: TextStyle, dp_scale: f32) -> Self {
+        Self {
+            font_size: style.font_size * dp_scale,
+            bold: style.bold,
+            italic: style.italic,
+            underline: style.underline,
+            strikethrough: style.strikethrough,
+            colour: style.colour,
+        }
+    }
+
+    fn fallback(dp_scale: f32) -> Self {
+        Self::from_text_style(TextStyle::default(), dp_scale)
+    }
+}
+
+/// Reads the paragraph alignment at UTF-16 position `pos` from `body_text`, if any.
+///
+/// Returns one of:
+/// * `0` for left
+/// * `1` for centre
+/// * `2` for right
+/// * any other value is treated as left.
+fn paragraph_alignment(body_text: Option<&sdocx::page::object::text::Text>, pos: u32) -> u32 {
+    let Some(bt) = body_text else { return 0; };
+    let Some(common) = bt.text_common() else { return 0; };
+    let paragraph_index = bt.paragraph_index_at(pos);
+    let paragraph_start = bt.paragraph_start_at(paragraph_index);
+    let mut best = None;
+    for p in common.paragraphs() {
+        if format!("{:?}", p.paragraph_base.paragraph_type) != "Alignment" {
+            continue;
+        }
+        let start = p.paragraph_base.start_pos;
+        if start > paragraph_start {
+            continue;
+        }
+        if let Some(b4) = p.bytes.get(0..4) {
+            let v = u32::from_le_bytes([b4[0], b4[1], b4[2], b4[3]]);
+            // Pick the alignment whose start_pos is closest to paragraph_start.
+            best = match best {
+                Some((best_start, _)) if start > best_start => Some((start, v)),
+                None => Some((start, v)),
+                other => other,
+            };
+        }
+    }
+    best.map(|(_, v)| v).unwrap_or(0)
+}
+
+/// Vertical flow state for the body text on one page.
+struct TextFlowState {
+    start_x: f32,
+    max_x: f32,
+    dp_scale: f32,
+    cur_y: f32,
+    flow_bottom: Option<f32>,
+    /// Bottom of the last line of text that was actually drawn on this page. Empty lines advance
+    /// `cur_y` but don't set this, so it can be used to tell whether there is real text above a
+    /// given point.
+    last_text_bottom: Option<f32>,
+    /// Bounding boxes of floating images on the page, which text must not be drawn over.
+    image_boxes: Vec<sdocx::Box2d<f64>>,
+}
+
+impl TextFlowState {
+    /// How far an inline object at `obj_y` needs to be moved down so that it doesn't cover text
+    /// that has already been drawn.
+    ///
+    /// Empty lines don't count as text: on a pageless note made only of handwriting, the object
+    /// positions recorded in the document are already correct and must not be adjusted.
+    fn inline_object_shift(&self, obj_y: f32) -> f32 {
+        match self.last_text_bottom {
+            Some(prev) if prev > obj_y => prev - obj_y,
+            _ => 0.0,
+        }
+    }
+
+    /// Cursor position at which a line of text of `font_size`, pushed below an image whose bottom
+    /// edge is at `image_bottom`, has its glyph tops `FLOATING_IMAGE_CLEARANCE` below the image.
+    ///
+    /// The baseline sits `BASELINE_EM` below the cursor and the glyphs `ASCENT_EM` above the
+    /// baseline, so the gap between the cursor and the glyph tops is `BASELINE_EM - ASCENT_EM`.
+    fn position_below_image(&self, image_bottom: f32, font_size: f32) -> f32 {
+        image_bottom + FLOATING_IMAGE_CLEARANCE - (BASELINE_EM - ASCENT_EM) * font_size
+    }
+
+    /// Moves `cur_y` down until a line of text starting there, and spanning `[x, x + width]`, no
+    /// longer intersects any floating image. A line that would intrude into an image is moved
+    /// below the bottom of that image.
+    ///
+    /// The vertical extent of the line is taken from the glyphs themselves (ascent and descent
+    /// around the baseline) rather than from the full line box, because the extra leading in the
+    /// line box is empty space and would otherwise push text below images that it doesn't actually
+    /// touch.
+    fn resolve_collision(&mut self, font_size: f32, x: f32, width: f32) {
+        let line_right = x + width.max(1.0);
+        let baseline = self.cur_y + font_size * BASELINE_EM;
+        let mut ink_top = baseline - font_size * ASCENT_EM;
+        let mut ink_bottom = baseline + font_size * DESCENT_EM;
+
+        // Images can be stacked, so keep going until nothing collides.
+        for _ in 0..32 {
+            let mut collided = false;
+
+            for bbox in &self.image_boxes {
+                let image_top = bbox.min.y as f32;
+                let image_bottom = bbox.max.y as f32;
+                let image_left = bbox.min.x as f32;
+                let image_right = bbox.max.x as f32;
+
+                if image_left >= line_right || image_right <= x {
+                    // No horizontal overlap, so the line can pass beside the image.
+                    continue;
+                }
+
+                let overlaps_vertically = ink_top < image_bottom - COLLISION_TOLERANCE
+                    && ink_bottom > image_top + COLLISION_TOLERANCE;
+
+                if overlaps_vertically {
+                    // Skip past the image, then recompute the ink band for the new position.
+                    self.cur_y = self.position_below_image(image_bottom, font_size);
+                    collided = true;
+                    break;
+                }
+            }
+
+            if !collided {
+                break;
+            }
+
+            let baseline = self.cur_y + font_size * BASELINE_EM;
+            ink_top = baseline - font_size * ASCENT_EM;
+            ink_bottom = baseline + font_size * DESCENT_EM;
+        }
+    }
 }
 
 impl<'s> PageConversionCtx<'s> {
@@ -1015,6 +1343,226 @@ impl<'s> PageConversionCtx<'s> {
         tool.draw_events(stroke_events, fill_boundary, &mut self.surface)
     }
 
+    /// Fills an axis-aligned rectangle using the current fill colour.
+    fn fill_rect(&mut self, x: f32, y: f32, width: f32, height: f32) {
+        if !(width > 0.0 && height > 0.0) {
+            return;
+        }
+
+        let Some(rect) = Rect::from_xywh(x, y, width, height) else {
+            return;
+        };
+
+        let mut builder = PathBuilder::new();
+        builder.push_rect(rect);
+
+        if let Some(path) = builder.finish() {
+            self.surface.draw_path(&path);
+        }
+    }
+
+    /// Draws a single styled run of text with its baseline at `baseline_y`, returning the advance
+    /// width of the run.
+    fn draw_text_run(
+        &mut self,
+        x: f32,
+        baseline_y: f32,
+        text: &str,
+        style: &RunStyle,
+        metrics: &FontMetrics,
+    ) -> f32 {
+        if text.is_empty() {
+            return 0.0;
+        }
+
+        let width = metrics.str_width(text, style.font_size);
+        let [b, g, r, a] = style.colour;
+
+        self.surface.set_stroke(None);
+        self.surface.set_fill(Some(Fill {
+            paint: rgb::Color::new(r, g, b).into(),
+            opacity: NormalizedF32::new(a as f32 / 255.0).unwrap_or(NormalizedF32::ONE),
+            ..Fill::default()
+        }));
+
+        // Italic text is synthesised by shearing around the baseline, so that the text keeps its
+        // position on the line instead of sliding sideways with the shear.
+        if style.italic {
+            self.surface.push_transform(&Transform::from_row(
+                1.0,
+                0.0,
+                ITALIC_SKEW,
+                1.0,
+                -ITALIC_SKEW * baseline_y,
+                0.0,
+            ));
+        }
+
+        self.surface.draw_text(
+            Point::from_xy(x, baseline_y),
+            get_font(style.bold),
+            style.font_size,
+            text,
+            false,
+            TextDirection::Auto,
+        );
+
+        if style.underline {
+            let thickness = (style.font_size * 0.055).max(0.4);
+            let y = baseline_y + style.font_size * UNDERLINE_BELOW_BASELINE_EM;
+            self.fill_rect(x, y, width, thickness);
+        }
+
+        if style.strikethrough {
+            let thickness = (style.font_size * 0.05).max(0.4);
+            let y = baseline_y - style.font_size * STRIKETHROUGH_ABOVE_BASELINE_EM;
+            self.fill_rect(x, y, width, thickness);
+        }
+
+        if style.italic {
+            self.surface.pop();
+        }
+
+        width
+    }
+
+    /// Draws one logical line (i.e. one document paragraph) of body text, including any list
+    /// marker and indentation, advancing `flow`.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_text_line(
+        &mut self,
+        flow: &mut TextFlowState,
+        body_text: Option<&sdocx::page::object::text::Text>,
+        line: &str,
+        line_start_u16: u32,
+        indent_level: u32,
+        marker: Option<&str>,
+        metrics_regular: &FontMetrics,
+        metrics_bold: &FontMetrics,
+    ) {
+        let trimmed = line.trim_end();
+
+        let base_style = body_text
+            .and_then(|bt| bt.style_at(line_start_u16))
+            .map(|style| RunStyle::from_text_style(style, flow.dp_scale))
+            .unwrap_or_else(|| RunStyle::fallback(flow.dp_scale));
+
+        let font_size = base_style.font_size.max(1.0);
+        let line_height = font_size * LINE_HEIGHT_FACTOR;
+        let line_x = flow.start_x + indent_level as f32 * font_size * INDENT_STEP_EM;
+        let base_metrics = if base_style.bold { metrics_bold } else { metrics_regular };
+
+        if trimmed.is_empty() {
+            // An empty line still takes up vertical space (the user pressed Enter).
+            flow.resolve_collision(font_size, line_x, font_size * 0.5);
+            flow.cur_y += line_height;
+            flow.flow_bottom = Some(flow.cur_y);
+            return;
+        }
+
+        // List markers push the text of the item to the right, and continuation lines of a wrapped
+        // item stay aligned with the item's text rather than with its marker.
+        let mut body_x = line_x;
+        if let Some(marker) = marker {
+            body_x += base_metrics.str_width(marker, font_size);
+        }
+
+        let available_width = (flow.max_x - body_x).max(50.0);
+        let ranges = wrap_text_ranges(trimmed, available_width, font_size, base_metrics);
+
+        for (range_index, &(char_start, char_end)) in ranges.iter().enumerate() {
+            let (byte_start, byte_end) = char_range(trimmed, char_start, char_end);
+            let text = trimmed[byte_start..byte_end].trim_end();
+
+            if text.is_empty() {
+                continue;
+            }
+
+            let abs_start = line_start_u16 + trimmed[..byte_start].encode_utf16().count() as u32;
+            let abs_end = abs_start + text.encode_utf16().count() as u32;
+
+            let runs = match body_text {
+                Some(bt) => bt.style_runs(abs_start, abs_end),
+                None => vec![(abs_start, TextStyle::default())],
+            };
+
+            let offsets = utf16_to_byte_offsets(text, abs_start);
+            let mut pieces: Vec<(String, RunStyle)> = Vec::new();
+
+            for (run_index, &(run_start, style)) in runs.iter().enumerate() {
+                let run_end = runs
+                    .get(run_index + 1)
+                    .map(|&(next_start, _)| next_start)
+                    .unwrap_or(abs_end);
+
+                let run_byte_start = byte_offset_for_utf16(&offsets, run_start);
+                let run_byte_end = byte_offset_for_utf16(&offsets, run_end);
+
+                if run_byte_end <= run_byte_start {
+                    continue;
+                }
+
+                pieces.push((
+                    text[run_byte_start..run_byte_end].to_string(),
+                    RunStyle::from_text_style(style, flow.dp_scale),
+                ));
+            }
+
+            if pieces.is_empty() {
+                continue;
+            }
+
+            let line_width: f32 = pieces
+                .iter()
+                .map(|(piece, style)| {
+                    let metrics = if style.bold { metrics_bold } else { metrics_regular };
+                    metrics.str_width(piece, style.font_size)
+                })
+                .sum();
+
+            // All runs share a baseline, which is placed as if the tallest run were the line's
+            // font.
+            let largest_font_size = pieces
+                .iter()
+                .map(|(_, style)| style.font_size)
+                .fold(font_size, f32::max);
+
+            // The first wrapped line honours the paragraph's alignment; continuation lines start
+            // at body_x. Samsung's reference exports align only the first line; we follow the same.
+            let mut body_x = body_x;
+            if range_index == 0 {
+                let alignment = paragraph_alignment(body_text, line_start_u16);
+                let available = (flow.max_x - body_x).max(0.0);
+                let shift = match alignment {
+                    1 => (available - line_width) * 0.5,
+                    2 => (available - line_width).max(0.0),
+                    _ => 0.0,
+                };
+                body_x += shift;
+            }
+
+            flow.resolve_collision(largest_font_size, body_x, line_width);
+
+            let baseline = flow.cur_y + largest_font_size * BASELINE_EM;
+
+            if range_index == 0 {
+                if let Some(marker) = marker {
+                    self.draw_text_run(line_x, baseline, marker, &base_style, base_metrics);
+                }
+            }
+
+            let mut x = body_x;
+            for (piece, style) in &pieces {
+                let metrics = if style.bold { metrics_bold } else { metrics_regular };
+                x += self.draw_text_run(x, baseline, piece, style, metrics);
+            }
+
+            flow.cur_y += line_height;
+            flow.flow_bottom = Some(flow.cur_y);
+            flow.last_text_bottom = Some(flow.cur_y);
+        }
+    }
+
     pub fn draw_single_object(
         &mut self,
         object: &sdocx::DocObject,
@@ -1051,7 +1599,119 @@ impl<'s> PageConversionCtx<'s> {
                     .map_err(DrawObjectError::ShapePath)
             }
 
+            sdocx::DocObject::Text(text) => {
+                self.draw_text_box(text, object.object_base().rect, object.object_base().angle());
+                Ok(())
+            }
+
             other => Err(DrawObjectError::Unsupported(<&str>::from(other))),
+        }
+    }
+
+    /// Draws a text box (`DocObject::Text`) inside the rectangle recorded in the document.
+    ///
+    /// Text boxes hold their own copy of the text stream, so they go through the same layout code
+    /// as the note body, just constrained to the box instead of the page margins.
+    fn draw_text_box(
+        &mut self,
+        text: &sdocx::page::object::text::Text,
+        rect: sdocx::Box2d<f64>,
+        angle: Option<f32>,
+    ) {
+        let dp_scale = self.dp_scale();
+
+        let start_x = rect.min.x as f32 + text.left_margin() * dp_scale;
+        let max_x = (rect.max.x as f32 - text.right_margin() * dp_scale).max(start_x + 1.0);
+        let start_y = rect.min.y as f32 + text.top_margin() * dp_scale;
+
+        // A text box can be rotated. Lay the text out unrotated and then rotate the result about
+        // the centre of the box, so that wrapping is unaffected by the angle.
+        let rotated = angle.filter(|a| a.abs() > 0.01);
+        if let Some(angle) = rotated {
+            self.surface
+                .push_transform(&rotation_about_centre(&rect, angle.to_radians()));
+        }
+
+        let mut flow = TextFlowState {
+            start_x,
+            max_x,
+            dp_scale,
+            cur_y: start_y,
+            flow_bottom: None,
+            last_text_bottom: None,
+            image_boxes: Vec::new(),
+        };
+
+        let metrics_regular = cached_metrics(false);
+        let metrics_bold = cached_metrics(true);
+
+        let raw = text.raw_string().unwrap_or("");
+        let units: Vec<u16> = raw.encode_utf16().collect();
+        let mut line_start = 0usize;
+        let mut next_number = 1u32;
+
+        while line_start <= units.len() {
+            let line_end = units[line_start..]
+                .iter()
+                .position(|&c| c == 0x000A)
+                .map(|pos| line_start + pos)
+                .unwrap_or(units.len());
+
+            let line = String::from_utf16_lossy(&units[line_start..line_end]);
+            let paragraph_index = text.paragraph_index_at(line_start as u32);
+            let indent_level = text.indent_level_at_paragraph(paragraph_index);
+
+            let marker = match text.bullet_at_paragraph(paragraph_index) {
+                Some(BulletStyle {
+                    kind: BulletKind::Numbered,
+                    number,
+                    ..
+                }) => {
+                    let number = if number > 0 { number } else { next_number };
+                    next_number = number + 1;
+                    Some(format!("{number}. "))
+                }
+                Some(_) => {
+                    next_number = 1;
+                    Some("\u{2022} ".to_string())
+                }
+                None => {
+                    next_number = 1;
+                    None
+                }
+            };
+
+            self.draw_text_line(
+                &mut flow,
+                Some(text),
+                &line,
+                line_start as u32,
+                indent_level,
+                marker.as_deref(),
+                metrics_regular,
+                metrics_bold,
+            );
+
+            if line_end < units.len() {
+                line_start = line_end + 1;
+            } else {
+                break;
+            }
+        }
+
+        if rotated.is_some() {
+            self.surface.pop();
+        }
+    }
+
+    /// Scale that maps the document's 360-unit-wide page to the output page width.
+    fn dp_scale(&self) -> f32 {
+        let page_width = self.input_box.width() as f32;
+
+        if page_width > 0.0 {
+            page_width / 360.0
+        } else {
+            1752.0 / 360.0
         }
     }
 
@@ -1100,28 +1760,35 @@ impl<'s> PageConversionCtx<'s> {
             None => (0.0, 0.0, 0.0),
         };
         let start_x = if left_m > 1.0 { left_m } else { 77.8667 };
-        let mut cur_y = if top_m > 1.0 { top_m } else { 48.6667 };
         let max_x = if right_m > 1.0 {
             page_width - right_m
         } else {
             page_width - start_x
         };
-        let max_line_width = (max_x - start_x).max(100.0);
 
-        let mut floating_image_boxes: Vec<sdocx::Box2d<f64>> = floating_objects
+        // Floating images are obstacles that the text flow has to avoid.
+        let mut image_boxes: Vec<sdocx::Box2d<f64>> = floating_objects
             .into_iter()
             .filter_map(|obj| match obj {
                 DocObject::Image(_) => Some(obj.object_base().rect),
                 _ => None,
             })
             .collect();
-        floating_image_boxes.sort_by(|a, b| {
+        image_boxes.sort_by(|a, b| {
             a.min.y
                 .partial_cmp(&b.min.y)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        let mut current_flow_bottom: Option<f32> = None;
+        let mut flow = TextFlowState {
+            start_x,
+            max_x,
+            dp_scale,
+            cur_y: if top_m > 1.0 { top_m } else { 48.6667 },
+            flow_bottom: None,
+            last_text_bottom: None,
+            image_boxes,
+        };
 
         let loaded_regular = get_loaded_font(false);
         let loaded_bold = get_loaded_font(true);
@@ -1156,24 +1823,8 @@ impl<'s> PageConversionCtx<'s> {
         page_inline_objs.sort_by_key(|io| io.index_in_text);
         let mut inline_idx = 0;
 
-        let resolve_collision = |cur_y: &mut f32| {
-            let mut collided = true;
-            while collided {
-                collided = false;
-                for bbox in &floating_image_boxes {
-                    let min_y = bbox.min.y as f32;
-                    let max_y = bbox.max.y as f32;
-                    let min_x = bbox.min.x as f32;
-                    let max_x_box = bbox.max.x as f32;
-                    if min_x < max_x && max_x_box > start_x {
-                        if *cur_y >= min_y - 15.0 && *cur_y < max_y {
-                            *cur_y = (*cur_y).max(max_y + 35.0);
-                            collided = true;
-                        }
-                    }
-                }
-            }
-        };
+        // Running counter for numbered list items that don't carry an explicit number.
+        let mut next_number = 1u32;
 
         if !page_u16_slice.is_empty() {
             let mut line_start_in_slice = 0;
@@ -1187,6 +1838,38 @@ impl<'s> PageConversionCtx<'s> {
                 let line_u16 = &page_u16_slice[line_start_in_slice..line_end_in_slice];
                 let line_doc_u16_pos = (page_start_u16 + line_start_in_slice) as u32;
 
+                // Paragraph-level formatting: indentation and list markers.
+                let (indent_level, bullet) = match opt_body_text {
+                    Some(bt) => {
+                        let paragraph_index = bt.paragraph_index_at(line_doc_u16_pos);
+                        (
+                            bt.indent_level_at_paragraph(paragraph_index),
+                            bt.bullet_at_paragraph(paragraph_index),
+                        )
+                    }
+                    None => (0, None),
+                };
+
+                let marker = match bullet {
+                    Some(BulletStyle {
+                        kind: BulletKind::Numbered,
+                        number,
+                        ..
+                    }) => {
+                        let number = if number > 0 { number } else { next_number };
+                        next_number = number + 1;
+                        Some(format!("{number}. "))
+                    }
+                    Some(_) => {
+                        next_number = 1;
+                        Some("\u{2022} ".to_string())
+                    }
+                    None => {
+                        next_number = 1;
+                        None
+                    }
+                };
+
                 if line_u16.iter().any(|&c| c == 0xFFFC) {
                     let mut sub_start = 0;
                     while sub_start <= line_u16.len() {
@@ -1198,49 +1881,25 @@ impl<'s> PageConversionCtx<'s> {
 
                         let sub_u16 = &line_u16[sub_start..sub_end];
                         let sub_doc_u16_pos = line_doc_u16_pos + sub_start as u32;
-
-                        let font_size_sp = opt_body_text
-                            .map(|bt| bt.font_size_at(sub_doc_u16_pos))
-                            .unwrap_or(15.0);
-                        let font_size_doc = font_size_sp * dp_scale;
-                        let line_height = font_size_doc * 1.35;
-                        let is_bold = opt_body_text
-                            .map(|bt| bt.is_bold_at(sub_doc_u16_pos))
-                            .unwrap_or(false);
-                        let [b, g, r, a] = opt_body_text
-                            .map(|bt| bt.text_color_at(sub_doc_u16_pos))
-                            .unwrap_or([37, 37, 37, 255]);
-
                         let sub_text = String::from_utf16_lossy(sub_u16);
-                        let trimmed = sub_text.trim_end();
-                        if !trimmed.is_empty() {
-                            let fill = Fill {
-                                paint: rgb::Color::new(r, g, b).into(),
-                                opacity: NormalizedF32::new(a as f32 / 255.0)
-                                    .unwrap_or(NormalizedF32::ONE),
-                                ..Fill::default()
-                            };
-                            self.surface.set_stroke(None);
-                            self.surface.set_fill(Some(fill));
 
-                            let metrics = if is_bold { &metrics_bold } else { &metrics_regular };
-                            let wrapped_lines = wrap_text_line(trimmed, max_line_width, font_size_doc, metrics);
-                            for wline in wrapped_lines {
-                                let wtrimmed = wline.trim_end();
-                                if !wtrimmed.is_empty() {
-                                    resolve_collision(&mut cur_y);
-                                    self.surface.draw_text(
-                                        Point::from_xy(start_x, cur_y + font_size_doc * 0.8),
-                                        get_font(is_bold),
-                                        font_size_doc,
-                                        wtrimmed,
-                                        false,
-                                        TextDirection::Auto,
-                                    );
-                                    cur_y += line_height;
-                                    current_flow_bottom = Some(cur_y);
-                                }
-                            }
+                        // The list marker belongs to the start of the line, not to each segment.
+                        let sub_marker = if sub_start == 0 { marker.as_deref() } else { None };
+
+                        // Segments on either side of an object placeholder are often empty. Those
+                        // must not consume a line of vertical space, or every object on the page
+                        // ends up pushed further down than the last.
+                        if !sub_text.trim().is_empty() {
+                            self.draw_text_line(
+                                &mut flow,
+                                opt_body_text,
+                                &sub_text,
+                                sub_doc_u16_pos,
+                                indent_level,
+                                sub_marker,
+                                &metrics_regular,
+                                &metrics_bold,
+                            );
                         }
 
                         if sub_end < line_u16.len() {
@@ -1248,41 +1907,32 @@ impl<'s> PageConversionCtx<'s> {
                             if inline_idx < page_inline_objs.len() {
                                 let io = page_inline_objs[inline_idx];
                                 inline_idx += 1;
+
                                 let bbox = io.object.object_base().rect;
                                 let obj_y = bbox.min.y as f32;
                                 let obj_h = bbox.height() as f32;
 
-                                let target_y = if let Some(prev) = current_flow_bottom {
-                                    if prev > obj_y { prev } else { obj_y }
-                                } else {
-                                    obj_y
-                                };
-                                let shift = target_y - obj_y;
+                                // Objects carry absolute positions, and for a note with no text
+                                // (handwriting on a pageless canvas) that position is already
+                                // exactly right. When there is text immediately above, though, our
+                                // own text layout may have ended up lower than the document's, so
+                                // move the object below the text instead of letting it cover what
+                                // we just drew.
+                                let shift = flow.inline_object_shift(obj_y);
 
-                                if shift.abs() > 0.01 {
+                                if shift > 0.01 {
                                     self.surface
                                         .push_transform(&Transform::from_translate(0.0, shift));
-                                    if let Err(err) = self.draw_single_object(
-                                        &io.object,
-                                        pen_width_mul,
-                                        marker_width_mul,
-                                        media,
-                                    ) {
-                                        err.log();
-                                    }
+                                    self.draw_inline_object(io, pen_width_mul, marker_width_mul, media);
                                     self.surface.pop();
                                 } else {
-                                    if let Err(err) = self.draw_single_object(
-                                        &io.object,
-                                        pen_width_mul,
-                                        marker_width_mul,
-                                        media,
-                                    ) {
-                                        err.log();
-                                    }
+                                    self.draw_inline_object(io, pen_width_mul, marker_width_mul, media);
                                 }
-                                cur_y = target_y + obj_h + 10.0;
-                                current_flow_bottom = Some(cur_y);
+
+                                // Continue the text flow below the object so that any following
+                                // text doesn't land on top of it.
+                                flow.cur_y = flow.cur_y.max(obj_y + shift + obj_h + 10.0);
+                                flow.flow_bottom = Some(flow.cur_y);
                             }
                             sub_start = sub_end + 1;
                         } else {
@@ -1290,54 +1940,17 @@ impl<'s> PageConversionCtx<'s> {
                         }
                     }
                 } else {
-                    let font_size_sp = opt_body_text
-                        .map(|bt| bt.font_size_at(line_doc_u16_pos))
-                        .unwrap_or(15.0);
-                    let font_size_doc = font_size_sp * dp_scale;
-                    let line_height = font_size_doc * 1.35;
-                    let is_bold = opt_body_text
-                        .map(|bt| bt.is_bold_at(line_doc_u16_pos))
-                        .unwrap_or(false);
-                    let [b, g, r, a] = opt_body_text
-                        .map(|bt| bt.text_color_at(line_doc_u16_pos))
-                        .unwrap_or([37, 37, 37, 255]);
-
                     let line_text = String::from_utf16_lossy(line_u16);
-                    let trimmed = line_text.trim_end();
-                    if !trimmed.is_empty() {
-                        let fill = Fill {
-                            paint: rgb::Color::new(r, g, b).into(),
-                            opacity: NormalizedF32::new(a as f32 / 255.0)
-                                .unwrap_or(NormalizedF32::ONE),
-                            ..Fill::default()
-                        };
-                        self.surface.set_stroke(None);
-                        self.surface.set_fill(Some(fill));
-
-                        let metrics = if is_bold { &metrics_bold } else { &metrics_regular };
-                        let wrapped_lines = wrap_text_line(trimmed, max_line_width, font_size_doc, metrics);
-                        for wline in wrapped_lines {
-                            let wtrimmed = wline.trim_end();
-                            if !wtrimmed.is_empty() {
-                                resolve_collision(&mut cur_y);
-                                self.surface.draw_text(
-                                    Point::from_xy(start_x, cur_y + font_size_doc * 0.8),
-                                    get_font(is_bold),
-                                    font_size_doc,
-                                    wtrimmed,
-                                    false,
-                                    TextDirection::Auto,
-                                );
-                                cur_y += line_height;
-                                current_flow_bottom = Some(cur_y);
-                            }
-                        }
-                    } else {
-                        // Empty line (user pressed enter)
-                        resolve_collision(&mut cur_y);
-                        cur_y += line_height;
-                        current_flow_bottom = Some(cur_y);
-                    }
+                    self.draw_text_line(
+                        &mut flow,
+                        opt_body_text,
+                        &line_text,
+                        line_doc_u16_pos,
+                        indent_level,
+                        marker.as_deref(),
+                        &metrics_regular,
+                        &metrics_bold,
+                    );
                 }
 
                 if line_end_in_slice < page_u16_slice.len() {
@@ -1348,56 +1961,43 @@ impl<'s> PageConversionCtx<'s> {
             }
         }
 
-        // Process any remaining inline objects (or if no text was present on this page)
+        // Process any remaining inline objects (or all of them, if no text was present on this
+        // page). These are positioned absolutely, like the ones handled in the text loop above.
         while inline_idx < page_inline_objs.len() {
             let io = page_inline_objs[inline_idx];
             inline_idx += 1;
+
             let bbox = io.object.object_base().rect;
-            let min_y = bbox.min.y as f32;
-            let height = bbox.height() as f32;
+            let obj_y = bbox.min.y as f32;
+            let obj_h = bbox.height() as f32;
+            let shift = flow.inline_object_shift(obj_y);
 
-            let is_block = matches!(
-                io.layout_option,
-                Some(InTextLayoutOption::Block)
-            ) || io.layout_option.is_none();
-
-            let mut shift_y = 0.0f32;
-            if is_block {
-                if let Some(prev_bottom) = current_flow_bottom {
-                    let target_y = prev_bottom + 10.0;
-                    if min_y < target_y {
-                        shift_y = target_y - min_y;
-                    }
-                }
-            }
-
-            if shift_y > 0.0 {
+            if shift > 0.01 {
                 self.surface
-                    .push_transform(&Transform::from_translate(0.0, shift_y));
-                if let Err(err) = self.draw_single_object(
-                    &io.object,
-                    pen_width_mul,
-                    marker_width_mul,
-                    media,
-                ) {
-                    err.log();
-                }
+                    .push_transform(&Transform::from_translate(0.0, shift));
+                self.draw_inline_object(io, pen_width_mul, marker_width_mul, media);
                 self.surface.pop();
-                current_flow_bottom = Some(min_y + shift_y + height);
             } else {
-                if let Err(err) = self.draw_single_object(
-                    &io.object,
-                    pen_width_mul,
-                    marker_width_mul,
-                    media,
-                ) {
-                    err.log();
-                }
-                current_flow_bottom = Some(match current_flow_bottom {
-                    Some(prev) => prev.max(min_y + height),
-                    None => min_y + height,
-                });
+                self.draw_inline_object(io, pen_width_mul, marker_width_mul, media);
             }
+
+            flow.cur_y = flow.cur_y.max(obj_y + shift + obj_h + 10.0);
+            flow.flow_bottom = Some(flow.cur_y);
+        }
+    }
+
+    /// Draws an inline object at the position recorded in the document.
+    fn draw_inline_object(
+        &mut self,
+        inline_object: &InlineObject,
+        pen_width_mul: f32,
+        marker_width_mul: f32,
+        media: &mut MediaStorage,
+    ) {
+        if let Err(err) =
+            self.draw_single_object(&inline_object.object, pen_width_mul, marker_width_mul, media)
+        {
+            err.log();
         }
     }
 
@@ -1472,5 +2072,135 @@ impl Drop for PageConversionCtx<'_> {
     fn drop(&mut self) {
         // Pop the coordinate transformation.
         self.surface.pop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_metrics() -> FontMetrics<'static> {
+        FontMetrics::new(NANUM_REGULAR_BYTES)
+    }
+
+    fn flow_with_image(min_y: f64, max_y: f64, min_x: f64, max_x: f64) -> TextFlowState {
+        TextFlowState {
+            start_x: 0.0,
+            max_x: 1000.0,
+            dp_scale: 1.0,
+            cur_y: 0.0,
+            flow_bottom: None,
+            last_text_bottom: None,
+            image_boxes: vec![sdocx::Box2d::new((min_x, min_y).into(), (max_x, max_y).into())],
+        }
+    }
+
+    #[test]
+    fn short_text_is_not_wrapped() {
+        let metrics = test_metrics();
+        let ranges = wrap_text_ranges("hello world", 10_000.0, 10.0, &metrics);
+
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0], (0, 11));
+    }
+
+    #[test]
+    fn long_text_is_wrapped_at_word_boundaries() {
+        let metrics = test_metrics();
+        let text = "aaa bbb ccc ddd eee fff ggg hhh iii jjj kkk lll";
+        let ranges = wrap_text_ranges(text, 60.0, 10.0, &metrics);
+
+        assert!(ranges.len() > 1, "expected wrapping, got {ranges:?}");
+
+        // Ranges must be contiguous, in order, and cover the whole string.
+        assert_eq!(ranges.first().unwrap().0, 0);
+        assert_eq!(ranges.last().unwrap().1, text.chars().count());
+        for pair in ranges.windows(2) {
+            assert_eq!(pair[0].1, pair[1].0);
+        }
+
+        // Each wrapped line must fit (allowing the slack used by the wrapper).
+        for &(start, end) in &ranges {
+            let line: String = text.chars().skip(start).take(end - start).collect();
+            assert!(
+                metrics.str_width(&line, 10.0) <= 60.0 + 25.0,
+                "line {line:?} is too wide"
+            );
+        }
+    }
+
+    #[test]
+    fn overlong_word_is_broken_between_characters() {
+        let metrics = test_metrics();
+        let ranges = wrap_text_ranges(&"a".repeat(100), 50.0, 10.0, &metrics);
+
+        assert!(ranges.len() > 1);
+        assert_eq!(ranges.last().unwrap().1, 100);
+    }
+
+    #[test]
+    fn utf16_offsets_handle_non_bmp_characters() {
+        // The emoji is a surrogate pair, so it occupies two UTF-16 units but one char.
+        let text = "a\u{1F600}b";
+        let offsets = utf16_to_byte_offsets(text, 10);
+
+        assert_eq!(byte_offset_for_utf16(&offsets, 10), 0);
+        assert_eq!(byte_offset_for_utf16(&offsets, 11), 1);
+        assert_eq!(byte_offset_for_utf16(&offsets, 13), 5);
+        assert_eq!(byte_offset_for_utf16(&offsets, 14), 6);
+
+        // Positions outside the range clamp to the nearest known offset.
+        assert_eq!(byte_offset_for_utf16(&offsets, 0), 0);
+        assert_eq!(byte_offset_for_utf16(&offsets, 99), 6);
+    }
+
+    #[test]
+    fn line_overlapping_an_image_is_moved_below_it() {
+        // The image starts where the first line would be drawn. The line's glyph tops land
+        // `FLOATING_IMAGE_CLEARANCE` below the image bottom, which means `cur_y` is shifted by the
+        // glyph-height-in-em difference as well.
+        let mut flow = flow_with_image(20.0, 500.0, 0.0, 400.0);
+        flow.resolve_collision(50.0, 0.0, 200.0);
+
+        let expected = 500.0 + FLOATING_IMAGE_CLEARANCE - (BASELINE_EM - ASCENT_EM) * 50.0;
+        assert_eq!(flow.cur_y, expected);
+    }
+
+    #[test]
+    fn line_above_an_image_is_left_alone() {
+        let mut flow = flow_with_image(300.0, 500.0, 0.0, 400.0);
+        flow.resolve_collision(50.0, 0.0, 200.0);
+
+        assert_eq!(flow.cur_y, 0.0);
+    }
+
+    #[test]
+    fn line_beside_an_image_is_left_alone() {
+        // The image is entirely to the right of the line.
+        let mut flow = flow_with_image(0.0, 500.0, 300.0, 400.0);
+        flow.resolve_collision(50.0, 0.0, 200.0);
+
+        assert_eq!(flow.cur_y, 0.0);
+    }
+
+    #[test]
+    fn collision_resolution_skips_stacked_images() {
+        let mut flow = TextFlowState {
+            start_x: 0.0,
+            max_x: 1000.0,
+            dp_scale: 1.0,
+            cur_y: 0.0,
+            flow_bottom: None,
+            last_text_bottom: None,
+            image_boxes: vec![
+                sdocx::Box2d::new((0.0, 10.0).into(), (400.0, 200.0).into()),
+                sdocx::Box2d::new((0.0, 210.0).into(), (400.0, 400.0).into()),
+            ],
+        };
+
+        flow.resolve_collision(50.0, 0.0, 200.0);
+
+        let expected = 400.0 + FLOATING_IMAGE_CLEARANCE - (BASELINE_EM - ASCENT_EM) * 50.0;
+        assert_eq!(flow.cur_y, expected);
     }
 }

@@ -9,7 +9,7 @@ use crate::{
         base::{HasObjectBase, ObjectBase},
         header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
         shape::{InvalidBorderTypeError, Shape, ShapeParseContext, ShapeParseError},
-        text_core::InlineObject,
+        text_core::{BulletStyle, InlineObject, TextStyle},
     },
     unpack_field_flags,
 };
@@ -79,6 +79,65 @@ impl Text {
 
     pub fn is_bold_at(&self, pos: u32) -> bool {
         self.text_common().map(|tc| tc.is_bold_at(pos)).unwrap_or(false)
+    }
+
+    pub fn is_italic_at(&self, pos: u32) -> bool {
+        self.text_common()
+            .map(|tc| tc.is_italic_at(pos))
+            .unwrap_or(false)
+    }
+
+    pub fn is_underline_at(&self, pos: u32) -> bool {
+        self.text_common()
+            .map(|tc| tc.is_underline_at(pos))
+            .unwrap_or(false)
+    }
+
+    pub fn is_strikethrough_at(&self, pos: u32) -> bool {
+        self.text_common()
+            .map(|tc| tc.is_strikethrough_at(pos))
+            .unwrap_or(false)
+    }
+
+    /// The full character-level formatting that applies at `pos` (a UTF-16 position in the raw
+    /// string).
+    pub fn style_at(&self, pos: u32) -> Option<TextStyle> {
+        self.text_common().map(|tc| tc.style_at(pos))
+    }
+
+    /// Splits `[start, end)` (UTF-16 positions) into contiguous runs that share a single style.
+    pub fn style_runs(&self, start: u32, end: u32) -> Vec<(u32, TextStyle)> {
+        match self.text_common() {
+            Some(tc) => tc.style_runs(start, end),
+            None => vec![(start, TextStyle::default())],
+        }
+    }
+
+    /// The index of the paragraph containing the UTF-16 position `pos`.
+    pub fn paragraph_index_at(&self, pos: u32) -> usize {
+        self.text_common()
+            .map(|tc| tc.paragraph_index_at(pos))
+            .unwrap_or(0)
+    }
+
+    /// The UTF-16 position at which the paragraph with `paragraph_index` starts.
+    pub fn paragraph_start_at(&self, paragraph_index: usize) -> u32 {
+        self.text_common()
+            .map(|tc| tc.paragraph_start_at(paragraph_index))
+            .unwrap_or(0)
+    }
+
+    /// The indentation level of the paragraph at `paragraph_index`.
+    pub fn indent_level_at_paragraph(&self, paragraph_index: usize) -> u32 {
+        self.text_common()
+            .map(|tc| tc.indent_level_at_paragraph(paragraph_index))
+            .unwrap_or(0)
+    }
+
+    /// List-item information for the paragraph at `paragraph_index`, if it is a list item.
+    pub fn bullet_at_paragraph(&self, paragraph_index: usize) -> Option<BulletStyle> {
+        self.text_common()
+            .and_then(|tc| tc.bullet_at_paragraph(paragraph_index))
     }
 }
 

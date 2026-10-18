@@ -80,19 +80,30 @@ struct Args {
     /// not in effect, either because it is disabled or because the document being converted does
     /// not embed any PDFs.
     ///
-    /// Basic splitting is disabled by default, resulting in long single-page PDFs when
-    /// auto-splitting is not used. To use basic splitting only, specify a mode and do not enable
-    /// auto-splitting. When basic splitting and auto-splitting are both enabled, basic splitting
-    /// is used as a fallback when there are no PDFs embedded in the document. If auto-splitting is
-    /// enabled but basic splitting is not, documents that embed PDFs will be auto-split, but those
-    /// that don't will not be split at all.
+    /// Pageless documents are split into A4-sized pages by default, matching what Samsung Notes
+    /// does when it exports a note to PDF. To use basic splitting only, specify a mode and do not
+    /// enable auto-splitting. When basic splitting and auto-splitting are both enabled, basic
+    /// splitting is used as a fallback when there are no PDFs embedded in the document. If
+    /// auto-splitting is enabled but basic splitting is not, documents that embed PDFs will be
+    /// auto-split, but those that don't will use the default A4 splitting.
     #[arg(
         long,
-        help = "Page-splitting mode for pageless documents without embedded PDFs \
-        or for when auto-splitting is disabled",
+        help = "Page-splitting mode for pageless documents (default: iso-portrait)",
         long_help
     )]
     basic_split: Option<BasicSplitMode>,
+
+    /// Keeps pageless documents as a single long page instead of splitting them into A4 pages.
+    ///
+    /// This is not recommended: a long note can easily produce a page far taller than the 200-inch
+    /// maximum that the PDF specification allows, and viewers handle such pages inconsistently
+    /// (some scale them down, some clip them).
+    #[arg(
+        long,
+        help = "Do not split pageless documents into pages (one long page instead)",
+        long_help
+    )]
+    no_split: bool,
 
     /// Specifies a multiplier for the widths of the fountain pen, calligraphy pen, ink pen,
     /// calligraphy brush and pencil.
@@ -152,7 +163,7 @@ fn create_document_pdf(
     let embed_map = EmbedMap::new(document, media_storage)?;
 
     let pages =
-        page::split_document_into_pages(document, &embed_map, args.auto_split, args.basic_split)
+        page::split_document_into_pages(document, &embed_map, args.auto_split, args.basic_split, args.no_split)
             // Collect the pages because the iterator borrows `embed_map`, and we need to move out
             // of it.
             .collect_vec();

@@ -37,6 +37,7 @@ pub fn convert_sdocx_to_pdf(
     marker_multiplier: f32,
     auto_split: bool,
     basic_split: Option<BasicSplitMode>,
+    no_split: bool,
 ) -> anyhow::Result<()> {
     let (document, mut media_storage) = match Document::from_zip(in_path) {
         Ok(v) => v,
@@ -52,7 +53,7 @@ pub fn convert_sdocx_to_pdf(
 
     let mut pdf = krilla::Document::new();
     let embed_map = EmbedMap::new(&document, &mut media_storage)?;
-    let pages = page::split_document_into_pages(&document, &embed_map, auto_split, basic_split).collect_vec();
+    let pages = page::split_document_into_pages(&document, &embed_map, auto_split, basic_split, no_split).collect_vec();
     let embedded_documents = embed_map.into_documents();
 
     let multi_progress = MultiProgress::new();

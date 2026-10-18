@@ -44,7 +44,9 @@ pub use shape_base::{
     LineStyleEffect,
 };
 pub use shared::{ColourType, GradientColour, GradientType, Path, PathSegment};
-pub use text_core::{InTextLayoutConstraint, InTextLayoutOption, InlineObject};
+pub use text_core::{
+    BulletKind, BulletStyle, InTextLayoutConstraint, InTextLayoutOption, InlineObject, TextStyle,
+};
 
 #[derive(Error, Debug)]
 #[error(transparent)]

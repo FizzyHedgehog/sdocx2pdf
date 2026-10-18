@@ -26,9 +26,9 @@ mathematically using smooth curves, and produces a PDF containing those curves. 
 **As of sdocx2pdf v0.4.0, handwriting, shapes, embedded PDFs and *most*[^1] images are represented
 in converted documents.**
 
-There are options for splitting pageless documents into pages based either on page length or on the
-page breaks in any embedded PDFs. You can also choose to convert a pageless document to a long
-single-page PDF.
+Pageless documents are split into A4-sized pages by default, matching what Samsung Notes itself
+does when it exports a note to PDF. You can instead split them based on the page breaks in any
+embedded PDFs, or keep the whole document as one long page with `--no-split`.
 
 These capabilities precisely fit my personal use case: I annotate documents and take notes in
 lectures using SNotes. I'd like to be able to read my work on devices that do not run SNotes, so

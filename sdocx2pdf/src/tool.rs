@@ -225,12 +225,38 @@ impl Tool {
             line_type,
         } = self.basics();
 
-        if !line_type.is_continuous() {
-            warn!("Dashed and dotted lines are not yet supported; will be drawn solid");
-        }
+        // Dashed and dotted strokes are stroked along their centre line with a dash pattern, so
+        // that the pattern is visible. The other tools fill the outline of the stroke, which works
+        // because their widths vary smoothly.
+        let is_dashed = !line_type.is_continuous();
 
-        // todo: Soft masks for pencil and calligraphy brush
-        // todo: Allow dashed/dotted lines
+        // When a stroke is drawn as a filled outline, it is built from circles of radius
+        // `0.5 * size * pressure`, so its visible width is `size * pressure`. A dash is stroked at
+        // a constant width, so we use the same effective width to keep the two consistent.
+        let pressure_for_width = if self.is_pressure_sensitive() {
+            0.55
+        } else {
+            0.45
+        };
+        let visual_width = size * pressure_for_width;
+
+        let dash = if is_dashed {
+            match line_type {
+                LineType::Continuous => None,
+                LineType::Dashed => Some(paint::StrokeDash {
+                    array: vec![visual_width * 3.0, visual_width * 2.0],
+                    offset: 0.0,
+                }),
+                LineType::Dotted => Some(paint::StrokeDash {
+                    // A zero-length dash combined with a round line cap draws a filled circle, so
+                    // we get perfectly round dots.
+                    array: vec![0.0, (visual_width * 2.5).max(visual_width * 2.0)],
+                    offset: 0.0,
+                }),
+            }
+        } else {
+            None
+        };
 
         if self.is_like_highlighter() {
             surface.push_blend_mode(krilla::blend::BlendMode::Multiply);
@@ -238,17 +264,17 @@ impl Tool {
 
         let paint: paint::Paint = rgb::Color::new(r, g, b).into();
         let opacity = NormalizedF32::new(a as f32 / 255.0).unwrap();
-        let is_opaque = a == 255;
 
-        if self.is_straight_only() {
-            // Will be drawn as a single path consisting of straight line segments, so we don't
-            // need to fill anything.
+        if dash.is_some() || self.is_straight_only() {
+            // Will be drawn as a stroked path, so we don't need to fill anything.
             surface.set_fill(None);
             surface.set_stroke(Some(paint::Stroke {
                 paint,
-                width: size,
+                width: if dash.is_some() { visual_width } else { size },
                 line_cap: krilla::paint::LineCap::Round,
+                line_join: krilla::paint::LineJoin::Round,
                 opacity,
+                dash,
                 ..paint::Stroke::default()
             }));
 
@@ -286,7 +312,7 @@ impl Tool {
             // paths for performance, and the result is that strokes drawn in that way do not look
             // as good as ones filled directly. For translucent strokes we don't really have a
             // choice, but for opaque strokes we do, and so we fill the latter directly.
-            if is_opaque {
+            if a == 255 {
                 surface.draw_path(path.borrow());
             } else {
                 surface.push_clip_path(path.borrow(), &paint::FillRule::NonZero);
@@ -322,36 +348,81 @@ impl Tool {
             ..
         } = self.basics();
 
-        if !line_type.is_continuous() {
-            warn!("Dashed and dotted lines are not yet supported; will be drawn solid");
-        }
-
-        let paths = if self.is_straight_only() {
-            Either::Left(strokes.into_iter().map(move |events| {
-                let mut pb = PathBuilder::new();
-                append_events_straight(events, &mut pb);
-                pb.finish().unwrap()
-            }))
+        // Dashed and dotted strokes need their dash pattern to be visible, so they are stroked
+        // along the centre line instead of being filled as an outline.
+        let mode = if !line_type.is_continuous() {
+            PathMode::Centre
+        } else if self.is_straight_only() {
+            PathMode::Straight
         } else {
-            // Increase the width for non-straight highlighters/markers.
-            let size = if self.is_like_highlighter() {
-                size * 2.5
-            } else {
-                size
-            };
-
-            let pressure_override = (!self.is_pressure_sensitive()).then_some(0.45);
-
-            Either::Right(strokes.into_iter().filter_map(move |events| {
-                let mut pb = PathBuilder::new();
-                append_events_basic(events, size, pressure_override, ArcMode::All, &mut pb);
-                pb.finish()
-            }))
+            PathMode::Outline
         };
+
+        let size = if self.is_like_highlighter() {
+            size * 2.5
+        } else {
+            size
+        };
+
+        let pressure_override = (!self.is_pressure_sensitive()).then_some(0.45);
+
+        let mut paths = Vec::new();
+
+        for events in strokes {
+            let mut pb = PathBuilder::new();
+
+            match mode {
+                PathMode::Outline => append_events_basic(
+                    events,
+                    size,
+                    pressure_override,
+                    ArcMode::All,
+                    &mut pb,
+                ),
+                PathMode::Straight => append_events_straight(events, &mut pb),
+                PathMode::Centre => append_events_centre(events, &mut pb),
+            }
+
+            if let Some(path) = pb.finish() {
+                paths.push(path);
+            }
+        }
 
         self.draw_paths(paths, fill_boundary, surface);
 
         Ok(())
+    }
+}
+
+/// How the events of a stroke should be turned into a path.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PathMode {
+    /// Trace the outline of the stroke, taking pressure into account.
+    Outline,
+
+    /// Draw a single straight line between the first and last event.
+    Straight,
+
+    /// Trace a line through the centre of the stroke, ignoring pressure.
+    Centre,
+}
+
+/// Appends a path that follows the centre of the stroke through its events.
+///
+/// Pressure is ignored, so the resulting path is only suitable for tools with a constant width,
+/// such as the fixed-width pens used for dashed and dotted lines.
+fn append_events_centre<'e>(events: EventGroup<'e>, path_builder: &mut PathBuilder) {
+    let events = events.events();
+    let mut iter = events.iter();
+
+    let Some(first) = iter.next() else {
+        return;
+    };
+
+    path_builder.move_to(first.point.x as f32, first.point.y as f32);
+
+    for event in iter {
+        path_builder.line_to(event.point.x as f32, event.point.y as f32);
     }
 }
 
