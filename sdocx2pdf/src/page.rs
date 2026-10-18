@@ -13,7 +13,10 @@ use num::ToPrimitive;
 use ordered_float::OrderedFloat;
 use sdocx::{
     DocObject, MediaStorage, euclid,
-    page::{PdfPage as EmbeddedPdfPage, object::InlineObject},
+    page::{
+        PdfPage as EmbeddedPdfPage,
+        object::{InTextLayoutOption, InlineObject},
+    },
 };
 use thiserror::Error;
 
@@ -448,6 +451,9 @@ pub struct PageCapture<'p> {
     /// The background colour of the parent page, if there is one.
     background_colour: Option<[u8; 4]>,
 
+    /// The background image ID of the parent page, if there is one.
+    background_image_id: Option<i32>,
+
     /// The embedded PDF pages captured.
     embeds: Vec<&'p EmbeddedPdfPage>,
 
@@ -495,6 +501,13 @@ impl<'p> PageContent<'p> {
         match self {
             PageContent::Slice(page_capture, ..) => page_capture.background_colour,
             PageContent::WholePage { page, .. } => page.background_colour(),
+        }
+    }
+
+    pub fn background_image_id(&self) -> Option<i32> {
+        match self {
+            PageContent::Slice(page_capture, ..) => page_capture.background_image_id,
+            PageContent::WholePage { page, .. } => page.background_image_id(),
         }
     }
 
@@ -573,6 +586,10 @@ fn group_inline_objects_by_page(document: &sdocx::Document) -> Vec<Vec<&InlineOb
                 );
             }
         }
+    }
+
+    for page_objs in &mut by_page {
+        page_objs.sort_by_key(|iobj| iobj.index_in_text);
     }
 
     by_page
@@ -686,6 +703,7 @@ pub fn split_document_into_pages<'d>(
                 Some(PageCapture {
                     capture_box,
                     background_colour,
+                    background_image_id: page.background_image_id(),
                     embeds: page
                         .embedded_pdf_pages()
                         .iter()
@@ -699,12 +717,16 @@ pub fn split_document_into_pages<'d>(
                         .collect(),
                     // There's only one input page, so all the inline objects in the document must
                     // be on it.
-                    inline_objects: doc
-                        .body_text()
-                        .inline_objects()
-                        .iter()
-                        .filter(|iobj| capture_box.intersects(&iobj.bounding_box()))
-                        .collect(),
+                    inline_objects: {
+                        let mut objs: Vec<_> = doc
+                            .body_text()
+                            .inline_objects()
+                            .iter()
+                            .filter(|iobj| capture_box.intersects(&iobj.bounding_box()))
+                            .collect();
+                        objs.sort_by_key(|iobj| iobj.index_in_text);
+                        objs
+                    },
                 })
             })
     });
@@ -821,6 +843,32 @@ impl<'s> PageConversionCtx<'s> {
         self.surface.draw_path(&self.boundary_path());
     }
 
+    pub fn draw_background_image(
+        &mut self,
+        image_name: &str,
+        media: &mut MediaStorage,
+    ) {
+        if let Ok(mut reader) = media.open_file(image_name) {
+            let mut image_bytes = Vec::new();
+            if reader.read_to_end(&mut image_bytes).is_ok() {
+                let img = krilla::image::Image::from_jpeg(image_bytes.clone().into(), true)
+                    .or_else(|_| krilla::image::Image::from_png(image_bytes.clone().into(), true))
+                    .or_else(|_| krilla::image::Image::from_webp(image_bytes.clone().into(), true))
+                    .or_else(|_| krilla::image::Image::from_gif(image_bytes.into(), true))
+                    .ok();
+                if let Some(img) = img {
+                    let input_box = self.input_box.cast::<f32>();
+                    let size = input_box.size();
+                    if let Some(sz) = krilla::geom::Size::from_wh(size.width, size.height) {
+                        self.surface.push_transform(&krilla::geom::Transform::from_translate(input_box.min.x, input_box.min.y));
+                        self.surface.draw_image(img, sz);
+                        self.surface.pop();
+                    }
+                }
+            }
+        }
+    }
+
     fn boundary_path(&self) -> krilla::geom::Path {
         let mut rect_pb = krilla::geom::PathBuilder::new();
 
@@ -881,6 +929,66 @@ impl<'s> PageConversionCtx<'s> {
             }
 
             other => Err(DrawObjectError::Unsupported(<&str>::from(other))),
+        }
+    }
+
+    pub fn draw_inline_objects<'a>(
+        &mut self,
+        inline_objects: impl IntoIterator<Item = &'a InlineObject>,
+        pen_width_mul: f32,
+        marker_width_mul: f32,
+        media: &mut MediaStorage,
+    ) {
+        let mut current_flow_bottom: Option<f32> = None;
+        const INLINE_GAP: f32 = 25.55;
+
+        for inline_obj in inline_objects {
+            let bbox = inline_obj.object.object_base().rect;
+            let min_y = bbox.min.y as f32;
+            let height = bbox.height() as f32;
+
+            let is_block = matches!(
+                inline_obj.layout_option,
+                Some(InTextLayoutOption::Block)
+            ) || inline_obj.layout_option.is_none();
+
+            let mut shift_y = 0.0f32;
+            if is_block {
+                if let Some(prev_bottom) = current_flow_bottom {
+                    let target_y = prev_bottom + INLINE_GAP;
+                    if min_y < target_y {
+                        shift_y = target_y - min_y;
+                    }
+                }
+            }
+
+            if shift_y > 0.0 {
+                self.surface
+                    .push_transform(&Transform::from_translate(0.0, shift_y));
+                if let Err(err) = self.draw_single_object(
+                    &inline_obj.object,
+                    pen_width_mul,
+                    marker_width_mul,
+                    media,
+                ) {
+                    err.log();
+                }
+                self.surface.pop();
+                current_flow_bottom = Some(min_y + shift_y + height);
+            } else {
+                if let Err(err) = self.draw_single_object(
+                    &inline_obj.object,
+                    pen_width_mul,
+                    marker_width_mul,
+                    media,
+                ) {
+                    err.log();
+                }
+                current_flow_bottom = Some(match current_flow_bottom {
+                    Some(prev) => prev.max(min_y + height),
+                    None => min_y + height,
+                });
+            }
         }
     }
 

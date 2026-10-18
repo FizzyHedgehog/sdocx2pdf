@@ -70,6 +70,12 @@ pub fn convert_sdocx_to_pdf(
             page_ctx.fill_background(r, g, b, a);
         }
 
+        if let Some(bg_id) = page.background_image_id() {
+            if let Some(bound_file) = document.file_registry().get(bg_id as u32) {
+                page_ctx.draw_background_image(bound_file.name(), &mut media_storage);
+            }
+        }
+
         for embed in page.embeds() {
             let src_page_index = embed.page_index() as usize;
             let dest_rect = embed.rect();
@@ -91,14 +97,12 @@ pub fn convert_sdocx_to_pdf(
             }
         }
 
-        for inline_obj in page.inline_objects() {
-            let _ = page_ctx.draw_single_object(
-                &inline_obj.object,
-                pen_multiplier,
-                marker_multiplier,
-                &mut media_storage,
-            );
-        }
+        page_ctx.draw_inline_objects(
+            page.inline_objects(),
+            pen_multiplier,
+            marker_multiplier,
+            &mut media_storage,
+        );
 
         page_ctx.draw_objects(
             page.objects(),

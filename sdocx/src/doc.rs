@@ -72,6 +72,7 @@ impl MediaStorage {
 
 #[derive(Debug)]
 pub struct Document {
+    file_registry: FileRegistry,
     note: NoteDoc,
     pages: Vec<Page>,
     end_tag: EndTag,
@@ -167,6 +168,7 @@ impl Document {
 
         Ok((
             Document {
+                file_registry,
                 note,
                 pages,
                 end_tag,
@@ -226,6 +228,7 @@ impl Document {
 
         Ok((
             Document {
+                file_registry,
                 note,
                 pages,
                 end_tag,
@@ -236,6 +239,10 @@ impl Document {
 
     pub fn pages(&self) -> &[Page] {
         &self.pages
+    }
+
+    pub fn file_registry(&self) -> &FileRegistry {
+        &self.file_registry
     }
 
     pub const fn page_model(&self) -> PageModel {

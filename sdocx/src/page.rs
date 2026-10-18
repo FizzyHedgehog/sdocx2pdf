@@ -395,6 +395,10 @@ impl Page {
     pub const fn background_colour(&self) -> Option<[u8; 4]> {
         self.background_colour
     }
+
+    pub const fn background_image_id(&self) -> Option<i32> {
+        self.background_image_id
+    }
 }
 
 impl<R: Read + Seek> TryParseWithContext<R, DocumentContext<'_, '_>> for Page {

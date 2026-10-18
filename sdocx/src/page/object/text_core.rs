@@ -202,8 +202,8 @@ impl<R: Read> TryParse<R> for Paragraph {
     }
 }
 
-#[derive(Debug, FromPrimitive)]
-enum InTextLayoutOption {
+#[derive(Debug, FromPrimitive, Clone, Copy, PartialEq, Eq)]
+pub enum InTextLayoutOption {
     /// `LAYOUT_OPTION_BLOCK`
     Block = 0,
     /// `LAYOUT_OPTION_INLINE`
@@ -221,8 +221,8 @@ impl_try_from_for_optional_from!(
     pub InvalidInTextLayoutOptionError,
 );
 
-#[derive(Debug, FromPrimitive)]
-enum InTextLayoutConstraint {
+#[derive(Debug, FromPrimitive, Clone, Copy, PartialEq, Eq)]
+pub enum InTextLayoutConstraint {
     /// `LAYOUT_CONSTRAINT_NORMAL`
     Normal = 0,
     /// `LAYOUT_CONSTRAINT_OVER_PAGES_OVERLAP_PADDING`
@@ -239,11 +239,11 @@ impl_try_from_for_optional_from!(
 );
 
 #[derive(Debug)]
-#[expect(dead_code)]
+#[allow(dead_code)]
 pub struct InlineObject {
-    index_in_text: u32,
-    layout_option: Option<InTextLayoutOption>,
-    layout_constraint: Option<InTextLayoutConstraint>,
+    pub index_in_text: u32,
+    pub layout_option: Option<InTextLayoutOption>,
+    pub layout_constraint: Option<InTextLayoutConstraint>,
     pub object: DocObject,
 }
 

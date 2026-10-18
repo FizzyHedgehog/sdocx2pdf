@@ -190,6 +190,12 @@ fn create_document_pdf(
             page_ctx.fill_background(r, g, b, a);
         }
 
+        if let Some(bg_id) = page.background_image_id() {
+            if let Some(bound_file) = document.file_registry().get(bg_id as u32) {
+                page_ctx.draw_background_image(bound_file.name(), media_storage);
+            }
+        }
+
         // Add any embedded PDF pages before drawing the page objects.
         for embed in page.embeds() {
             let src_page_index = embed.page_index() as usize;
@@ -229,16 +235,12 @@ fn create_document_pdf(
             page_ctx.surface.pop();
         }
 
-        for inline_obj in page.inline_objects() {
-            if let Err(err) = page_ctx.draw_single_object(
-                &inline_obj.object,
-                args.pen_width_multiplier,
-                args.marker_width_multiplier,
-                media_storage,
-            ) {
-                err.log();
-            }
-        }
+        page_ctx.draw_inline_objects(
+            page.inline_objects(),
+            args.pen_width_multiplier,
+            args.marker_width_multiplier,
+            media_storage,
+        );
 
         page_ctx.draw_objects(
             page.objects(),
