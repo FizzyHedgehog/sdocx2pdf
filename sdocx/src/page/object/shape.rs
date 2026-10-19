@@ -419,7 +419,6 @@ pub struct Template {
 }
 
 #[derive(Debug)]
-#[expect(dead_code)]
 pub struct ShapeData {
     shape_type: ShapeType,
     fill_effect: Option<FillEffect>,
