@@ -9,7 +9,7 @@ use crate::{
         base::{HasObjectBase, ObjectBase},
         header::{FlagBlockError, ObjectHeaderError, try_parse_object_header},
         shape::{InvalidBorderTypeError, Shape, ShapeParseContext, ShapeParseError},
-        text_core::{BulletStyle, InlineObject, TextStyle},
+        text_core::{BulletStyle, InlineObject, ParagraphAlignment, TextStyle},
     },
     unpack_field_flags,
 };
@@ -138,6 +138,13 @@ impl Text {
     pub fn bullet_at_paragraph(&self, paragraph_index: usize) -> Option<BulletStyle> {
         self.text_common()
             .and_then(|tc| tc.bullet_at_paragraph(paragraph_index))
+    }
+
+    /// The horizontal alignment of the paragraph at `paragraph_index`.
+    pub fn alignment_at_paragraph(&self, paragraph_index: usize) -> ParagraphAlignment {
+        self.text_common()
+            .map(|tc| tc.alignment_at_paragraph(paragraph_index))
+            .unwrap_or_default()
     }
 }
 

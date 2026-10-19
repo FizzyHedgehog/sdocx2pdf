@@ -22,7 +22,7 @@ use sdocx::{
     DocObject, MediaStorage, euclid,
     page::{
         PdfPage as EmbeddedPdfPage,
-        object::{BulletKind, BulletStyle, InlineObject, TextStyle},
+        object::{BulletKind, BulletStyle, InlineObject, ParagraphAlignment, TextStyle},
     },
 };
 use thiserror::Error;
@@ -982,9 +982,101 @@ fn rotation_about_centre(rect: &sdocx::Box2d<f64>, angle: f32) -> Transform {
     Transform::from_row(cos, sin, -sin, cos, cx - cx * cos + cy * sin, cy - cx * sin - cy * cos)
 }
 
+/// Whether `c` belongs to a script that can be broken between characters (Hangul, Han, Kana and
+/// full-width forms). Latin text may only be broken at spaces, but CJK text may be broken between
+/// any two characters, which is how Samsung Notes lays out Korean.
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32,
+        0x1100..=0x11FF     // Hangul Jamo
+        | 0x2E80..=0x2FDF   // CJK radicals, Kangxi radicals
+        | 0x3040..=0x30FF   // Hiragana, Katakana
+        | 0x3130..=0x318F   // Hangul compatibility Jamo
+        | 0x3400..=0x4DBF   // CJK unified ideographs extension A
+        | 0x4E00..=0x9FFF   // CJK unified ideographs
+        | 0xA960..=0xA97F   // Hangul Jamo extension A
+        | 0xAC00..=0xD7A3   // Hangul syllables
+        | 0xF900..=0xFAFF   // CJK compatibility ideographs
+        | 0xFF01..=0xFF60   // Full-width forms
+        | 0x20000..=0x2FA1F // CJK unified ideographs extension B and beyond
+    )
+}
+
+/// Characters that must not be pushed onto the next line (closing punctuation and brackets).
+fn cannot_start_line(c: char) -> bool {
+    matches!(
+        c,
+        '.' | ','
+            | '!'
+            | '?'
+            | ':'
+            | ';'
+            | ')'
+            | ']'
+            | '}'
+            | '%'
+            | '…'
+            | '」'
+            | '』'
+            | '】'
+            | '》'
+            | '»'
+            | '、'
+            | '。'
+            | '！'
+            | '？'
+            | '：'
+            | '；'
+            | '）'
+            | '］'
+            | '｝'
+    )
+}
+
+/// Characters that must not be left dangling at the end of a line (opening brackets).
+fn cannot_end_line(c: char) -> bool {
+    matches!(
+        c,
+        '(' | '[' | '{' | '「' | '『' | '【' | '《' | '«' | '（' | '［' | '｛'
+    )
+}
+
+/// Whether a line may be broken immediately before `chars[i]`.
+///
+/// A break is allowed at a space, and between two CJK characters (so Korean is broken between
+/// syllables, exactly like Samsung Notes does). Latin words are kept intact, and a few
+/// punctuation combinations are prohibited so that a line never starts with a closing bracket or
+/// ends with an opening one.
+fn can_break_before(chars: &[char], i: usize) -> bool {
+    if i == 0 || i >= chars.len() {
+        return false;
+    }
+
+    let previous = chars[i - 1];
+    let current = chars[i];
+
+    // A space stays at the end of the line it follows; the next line starts with a real character.
+    if current == ' ' {
+        return false;
+    }
+
+    if cannot_start_line(current) || cannot_end_line(previous) {
+        return false;
+    }
+
+    if previous == ' ' {
+        return true;
+    }
+
+    is_cjk(previous) || is_cjk(current)
+}
+
 /// Wraps `text` into lines that fit within `max_width`, returning character-index ranges into
-/// `text` for each line. Words are kept intact unless a single word is wider than a whole line, in
-/// which case it is broken character by character.
+/// `text` for each line.
+///
+/// The text is filled greedily up to `max_width` and broken at the last legal break opportunity
+/// (`can_break_before`). This mirrors Samsung Notes' own layout: a line is filled until the next
+/// syllable or word no longer fits, with no artificial slack. A single unit that is wider than a
+/// whole line (a long Latin word, for example) is broken between characters.
 fn wrap_text_ranges(
     text: &str,
     max_width: f32,
@@ -997,54 +1089,47 @@ fn wrap_text_ranges(
         return vec![(0, chars.len())];
     }
 
-    // A little slack, so that we don't wrap a word just because our metrics are marginally wider
-    // than the ones the original app used.
-    let wrap_limit = max_width + 25.0;
-
     let mut ranges = Vec::new();
     let mut line_start = 0usize;
-    let mut current_width = 0.0f32;
+    let mut line_width = 0.0f32;
     let mut i = 0usize;
 
+    // The most recent place a line could be broken, together with the width of the line up to it.
+    let mut last_break: Option<(usize, f32)> = None;
+
     while i < chars.len() {
-        // A word is a run of characters ending with a space, and the space is kept.
-        let mut word_end = i;
-        while word_end < chars.len() && chars[word_end] != ' ' {
-            word_end += 1;
-        }
-        if word_end < chars.len() {
-            word_end += 1;
-        }
+        let char_width = metrics.char_width(chars[i], font_size);
 
-        let word: String = chars[i..word_end].iter().collect();
-        let word_width = metrics.str_width(&word, font_size);
-        let line_is_empty = i == line_start;
+        // A line always takes at least one character, even if that character is too wide for it.
+        // A space is never wrapped onto the next line: it stays at the end of the line it belongs
+        // to, where it is invisible (the caller trims it), so it may overhang `max_width`.
+        let is_space = chars[i] == ' ';
 
-        if word_width > wrap_limit {
-            // The word can't fit on a line of its own, so break it up character by character. This
-            // also applies to an empty line, which would otherwise be allowed to overflow.
-            for k in i..word_end {
-                let char_width = metrics.char_width(chars[k], font_size);
+        if line_width + char_width <= max_width || is_space || i == line_start {
+            line_width += char_width;
+            i += 1;
 
-                if current_width + char_width > wrap_limit && k > line_start {
-                    ranges.push((line_start, k));
-                    line_start = k;
-                    current_width = 0.0;
-                }
-
-                current_width += char_width;
+            if can_break_before(&chars, i) {
+                last_break = Some((i, line_width));
             }
 
-            i = word_end;
-        } else if current_width + word_width <= wrap_limit || line_is_empty {
-            current_width += word_width;
-            i = word_end;
+            continue;
+        }
+
+        if let Some((break_at, width_at_break)) = last_break.filter(|&(at, _)| at > line_start) {
+            ranges.push((line_start, break_at));
+            line_start = break_at;
+
+            // `line_width` is measured from the old `line_start`; drop the part that moved down.
+            line_width -= width_at_break;
+            last_break = None;
         } else {
-            // Move the whole word onto the next line. Don't advance `i`, so that the word is
-            // measured again against the new (empty) line.
+            // Nowhere legal to break before this character, so break here. This is what splits a
+            // word that cannot fit on a line of its own.
             ranges.push((line_start, i));
             line_start = i;
-            current_width = 0.0;
+            line_width = 0.0;
+            last_break = None;
         }
     }
 
@@ -1132,38 +1217,37 @@ impl RunStyle {
     }
 }
 
-/// Reads the paragraph alignment at UTF-16 position `pos` from `body_text`, if any.
+/// The horizontal alignment of the paragraph that contains the UTF-16 position `pos`.
 ///
-/// Returns one of:
-/// * `0` for left
-/// * `1` for centre
-/// * `2` for right
-/// * any other value is treated as left.
-fn paragraph_alignment(body_text: Option<&sdocx::page::object::text::Text>, pos: u32) -> u32 {
-    let Some(bt) = body_text else { return 0; };
-    let Some(common) = bt.text_common() else { return 0; };
-    let paragraph_index = bt.paragraph_index_at(pos);
-    let paragraph_start = bt.paragraph_start_at(paragraph_index);
-    let mut best = None;
-    for p in common.paragraphs() {
-        if format!("{:?}", p.paragraph_base.paragraph_type) != "Alignment" {
-            continue;
-        }
-        let start = p.paragraph_base.start_pos;
-        if start > paragraph_start {
-            continue;
-        }
-        if let Some(b4) = p.bytes.get(0..4) {
-            let v = u32::from_le_bytes([b4[0], b4[1], b4[2], b4[3]]);
-            // Pick the alignment whose start_pos is closest to paragraph_start.
-            best = match best {
-                Some((best_start, _)) if start > best_start => Some((start, v)),
-                None => Some((start, v)),
-                other => other,
-            };
-        }
+/// Paragraph attributes are keyed by paragraph index, not by character position, so the position
+/// has to be converted before looking the alignment up. Without this, alignment records for
+/// paragraphs far into the note (for example the centre/right aligned body text on page 8) were
+/// compared against a character offset and never matched.
+fn paragraph_alignment(
+    body_text: Option<&sdocx::page::object::text::Text>,
+    pos: u32,
+) -> ParagraphAlignment {
+    let Some(bt) = body_text else {
+        return ParagraphAlignment::Left;
+    };
+
+    bt.alignment_at_paragraph(bt.paragraph_index_at(pos))
+}
+
+/// Horizontal offset that puts a line of `line_width` at the right place inside a space
+/// `available` units wide.
+///
+/// A line that is wider than the space (the wrapper allows a little slack so that marginally
+/// different metrics don't force an extra line) is left at the start of the space rather than
+/// pushed outside it.
+fn alignment_shift(alignment: ParagraphAlignment, available: f32, line_width: f32) -> f32 {
+    let slack = (available - line_width).max(0.0);
+
+    match alignment {
+        ParagraphAlignment::Centre => slack * 0.5,
+        ParagraphAlignment::Right => slack,
+        ParagraphAlignment::Left => 0.0,
     }
-    best.map(|(_, v)| v).unwrap_or(0)
 }
 
 /// Vertical flow state for the body text on one page.
@@ -1470,6 +1554,9 @@ impl<'s> PageConversionCtx<'s> {
         let available_width = (flow.max_x - body_x).max(50.0);
         let ranges = wrap_text_ranges(trimmed, available_width, font_size, base_metrics);
 
+        // The alignment belongs to the paragraph, so it is the same for every wrapped line.
+        let alignment = paragraph_alignment(body_text, line_start_u16);
+
         for (range_index, &(char_start, char_end)) in ranges.iter().enumerate() {
             let (byte_start, byte_end) = char_range(trimmed, char_start, char_end);
             let text = trimmed[byte_start..byte_end].trim_end();
@@ -1527,19 +1614,11 @@ impl<'s> PageConversionCtx<'s> {
                 .map(|(_, style)| style.font_size)
                 .fold(font_size, f32::max);
 
-            // The first wrapped line honours the paragraph's alignment; continuation lines start
-            // at body_x. Samsung's reference exports align only the first line; we follow the same.
+            // Every visual line of the paragraph is aligned on its own, so a wrapped paragraph
+            // has each of its lines centred/right-aligned within the available width (Samsung's
+            // own exports do the same: the second line of a centred paragraph is centred too).
             let mut body_x = body_x;
-            if range_index == 0 {
-                let alignment = paragraph_alignment(body_text, line_start_u16);
-                let available = (flow.max_x - body_x).max(0.0);
-                let shift = match alignment {
-                    1 => (available - line_width) * 0.5,
-                    2 => (available - line_width).max(0.0),
-                    _ => 0.0,
-                };
-                body_x += shift;
-            }
+            body_x += alignment_shift(alignment, (flow.max_x - body_x).max(0.0), line_width);
 
             flow.resolve_collision(largest_font_size, body_x, line_width);
 
@@ -2119,13 +2198,73 @@ mod tests {
             assert_eq!(pair[0].1, pair[1].0);
         }
 
-        // Each wrapped line must fit (allowing the slack used by the wrapper).
+        // Each wrapped line must fit within the available width. The wrapper has no artificial
+        // slack, so a line may only exceed it by the single character that had nowhere to break.
+        // Trailing spaces are invisible (the caller trims them), so they don't count.
         for &(start, end) in &ranges {
             let line: String = text.chars().skip(start).take(end - start).collect();
+            let line = line.trim_end();
             assert!(
-                metrics.str_width(&line, 10.0) <= 60.0 + 25.0,
+                metrics.str_width(line, 10.0) <= 60.0,
                 "line {line:?} is too wide"
             );
+        }
+    }
+
+    #[test]
+    fn korean_is_wrapped_between_syllables() {
+        let metrics = test_metrics();
+        // A single Korean "word": the only way to wrap it is between syllables.
+        let text = "가나다라마바사아자차카타파하";
+        let ranges = wrap_text_ranges(text, 60.0, 10.0, &metrics);
+
+        assert!(ranges.len() > 1, "expected wrapping, got {ranges:?}");
+        assert_eq!(ranges.first().unwrap().0, 0);
+        assert_eq!(ranges.last().unwrap().1, text.chars().count());
+
+        for pair in ranges.windows(2) {
+            assert_eq!(pair[0].1, pair[1].0);
+        }
+
+        // The first line must be filled as far as possible: one more syllable would not fit.
+        let first_line: String = text.chars().take(ranges[0].1).collect();
+        let first_width = metrics.str_width(&first_line, 10.0);
+        let next_syllable = text.chars().nth(ranges[0].1).unwrap();
+
+        assert!(first_width <= 60.0, "line {first_line:?} is too wide");
+        assert!(
+            first_width + metrics.char_width(next_syllable, 10.0) > 60.0,
+            "line {first_line:?} stopped short of the available width"
+        );
+    }
+
+    #[test]
+    fn closing_punctuation_is_not_orphaned_on_the_next_line() {
+        let metrics = test_metrics();
+        let text = "가나다라마바사.";
+        let syllable = metrics.char_width('가', 10.0);
+        let period = metrics.char_width('.', 10.0);
+
+        // Room for seven syllables but not for the full stop that follows them.
+        let width = syllable * 7.0 + period * 0.5;
+        let ranges = wrap_text_ranges(text, width, 10.0, &metrics);
+
+        let period_index = text.chars().count() - 1;
+        assert!(
+            ranges.iter().all(|&(start, _)| start != period_index),
+            "the full stop was pushed onto a line of its own: {ranges:?}"
+        );
+    }
+
+    #[test]
+    fn a_space_stays_at_the_end_of_the_previous_line() {
+        let metrics = test_metrics();
+        let text = "가나 다라 마바 사아";
+        let ranges = wrap_text_ranges(text, 40.0, 10.0, &metrics);
+
+        for &(start, _) in &ranges {
+            let first = text.chars().nth(start).unwrap();
+            assert_ne!(first, ' ', "a line started with a space: {ranges:?}");
         }
     }
 
@@ -2136,6 +2275,22 @@ mod tests {
 
         assert!(ranges.len() > 1);
         assert_eq!(ranges.last().unwrap().1, 100);
+    }
+
+    #[test]
+    fn alignment_shift_places_the_line_in_the_available_space() {
+        // 100 units available, a 40-unit line: 30 to centre, 60 to right-align.
+        assert_eq!(alignment_shift(ParagraphAlignment::Left, 100.0, 40.0), 0.0);
+        assert_eq!(alignment_shift(ParagraphAlignment::Centre, 100.0, 40.0), 30.0);
+        assert_eq!(alignment_shift(ParagraphAlignment::Right, 100.0, 40.0), 60.0);
+    }
+
+    #[test]
+    fn alignment_shift_never_pushes_a_line_out_of_its_space() {
+        // The wrapper allows some slack, so a line can be wider than the space it is measured
+        // against. Such a line stays at the start of the space.
+        assert_eq!(alignment_shift(ParagraphAlignment::Centre, 100.0, 120.0), 0.0);
+        assert_eq!(alignment_shift(ParagraphAlignment::Right, 100.0, 120.0), 0.0);
     }
 
     #[test]

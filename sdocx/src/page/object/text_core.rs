@@ -254,6 +254,32 @@ pub enum ParagraphType {
 
 impl_try_from_for_optional_from!(ParagraphType, u32, from_u32, pub InvalidParagraphTypeError);
 
+/// Horizontal alignment of a paragraph, as stored in a `TYPE_ALIGN` paragraph attribute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ParagraphAlignment {
+    /// `ALIGN_LEFT`
+    #[default]
+    Left,
+
+    /// `ALIGN_RIGHT`
+    Right,
+
+    /// `ALIGN_CENTER`
+    Centre,
+}
+
+impl ParagraphAlignment {
+    /// Maps the raw value stored in the document to an alignment. `0` is left, `1` is right and
+    /// `2` is centre; anything else (including values we have never seen) is treated as left.
+    const fn from_raw(value: u32) -> Self {
+        match value {
+            1 => Self::Right,
+            2 => Self::Centre,
+            _ => Self::Left,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ParagraphBase {
     pub paragraph_type: ParagraphType,
@@ -625,6 +651,10 @@ impl Common {
     }
 
     /// The indentation level of the paragraph at `paragraph_index`.
+    ///
+    /// Note that paragraph attributes are keyed by *paragraph* index (the number of newlines
+    /// before the paragraph), not by character position: a `TYPE_INDENTLEVEL` record spans a run
+    /// of paragraphs.
     pub fn indent_level_at_paragraph(&self, paragraph_index: usize) -> u32 {
         self.paragraphs
             .iter()
@@ -652,6 +682,25 @@ impl Common {
                     && paragraph_covers(&paragraph.paragraph_base, paragraph_index)
             })
             .find_map(|paragraph| BulletStyle::from_bytes(&paragraph.bytes))
+    }
+
+    /// The horizontal alignment of the paragraph at `paragraph_index`.
+    ///
+    /// Like the other paragraph attributes, a `TYPE_ALIGN` record covers a *run of paragraphs*
+    /// (`start_pos..end_pos` are paragraph indices), so the record has to be matched against the
+    /// paragraph index rather than against a character position. Records are written only where
+    /// the alignment differs from the default, and the last record that covers a paragraph wins.
+    pub fn alignment_at_paragraph(&self, paragraph_index: usize) -> ParagraphAlignment {
+        self.paragraphs
+            .iter()
+            .filter(|paragraph| {
+                paragraph.paragraph_base.paragraph_type == ParagraphType::Alignment
+                    && paragraph_covers(&paragraph.paragraph_base, paragraph_index)
+            })
+            .max_by_key(|paragraph| paragraph.paragraph_base.start_pos)
+            .and_then(|paragraph| read_u32_at(&paragraph.bytes, 0))
+            .map(ParagraphAlignment::from_raw)
+            .unwrap_or_default()
     }
 }
 
@@ -863,5 +912,96 @@ mod tests {
         // First word is zero, so the second word carries the level.
         assert_eq!(read_u32_at(&[0, 0, 0, 0, 2, 0, 0, 0], 0), Some(0));
         assert_eq!(read_u32_at(&[0, 0, 0, 0, 2, 0, 0, 0], 4), Some(2));
+    }
+
+    fn paragraph(paragraph_type: ParagraphType, start_pos: u32, end_pos: u32) -> Paragraph {
+        Paragraph {
+            paragraph_base: ParagraphBase {
+                paragraph_type,
+                start_pos,
+                end_pos,
+            },
+            bytes: vec![],
+        }
+    }
+
+    fn alignment(start_pos: u32, end_pos: u32, value: u32) -> Paragraph {
+        Paragraph {
+            paragraph_base: ParagraphBase {
+                paragraph_type: ParagraphType::Alignment,
+                start_pos,
+                end_pos,
+            },
+            bytes: value.to_le_bytes().to_vec(),
+        }
+    }
+
+    fn common_with(paragraphs: Vec<Paragraph>) -> Common {
+        Common {
+            text: String::new(),
+            left_margin: 0.0,
+            top_margin: 0.0,
+            right_margin: 0.0,
+            bottom_margin: 0.0,
+            gravity: Gravity::Top,
+            spans: vec![],
+            paragraphs,
+            section_data: vec![],
+            inline_objects: vec![],
+        }
+    }
+
+    #[test]
+    fn alignment_values_map_to_the_documented_meanings() {
+        // `1` is right and `2` is centre. Unknown values fall back to left.
+        assert_eq!(ParagraphAlignment::from_raw(0), ParagraphAlignment::Left);
+        assert_eq!(ParagraphAlignment::from_raw(1), ParagraphAlignment::Right);
+        assert_eq!(ParagraphAlignment::from_raw(2), ParagraphAlignment::Centre);
+        assert_eq!(ParagraphAlignment::from_raw(9), ParagraphAlignment::Left);
+    }
+
+    #[test]
+    fn alignment_is_looked_up_by_paragraph_index() {
+        // Mirrors the shape of a real note: the centre/right runs start deep into the note
+        // (paragraph 170), far beyond the character position of the paragraph they belong to.
+        let common = common_with(vec![
+            paragraph(ParagraphType::ParsingState, 0, 1),
+            alignment(0, 1, 0),
+            alignment(170, 176, 2),
+            alignment(176, 183, 1),
+            alignment(187, 188, 0),
+        ]);
+
+        assert_eq!(common.alignment_at_paragraph(0), ParagraphAlignment::Left);
+        assert_eq!(common.alignment_at_paragraph(169), ParagraphAlignment::Left);
+
+        // The centre run covers paragraphs 170..176 (half-open).
+        assert_eq!(common.alignment_at_paragraph(170), ParagraphAlignment::Centre);
+        assert_eq!(common.alignment_at_paragraph(175), ParagraphAlignment::Centre);
+
+        // The right run covers 176..183.
+        assert_eq!(common.alignment_at_paragraph(176), ParagraphAlignment::Right);
+        assert_eq!(common.alignment_at_paragraph(182), ParagraphAlignment::Right);
+
+        // Past the last record the alignment is back to the default.
+        assert_eq!(common.alignment_at_paragraph(183), ParagraphAlignment::Left);
+        assert_eq!(common.alignment_at_paragraph(187), ParagraphAlignment::Left);
+        assert_eq!(common.alignment_at_paragraph(500), ParagraphAlignment::Left);
+    }
+
+    #[test]
+    fn later_alignment_record_wins_when_runs_overlap() {
+        let common = common_with(vec![alignment(5, 20, 2), alignment(8, 12, 1)]);
+
+        assert_eq!(common.alignment_at_paragraph(5), ParagraphAlignment::Centre);
+        assert_eq!(common.alignment_at_paragraph(8), ParagraphAlignment::Right);
+        assert_eq!(common.alignment_at_paragraph(12), ParagraphAlignment::Centre);
+    }
+
+    #[test]
+    fn alignment_record_without_payload_is_ignored() {
+        let common = common_with(vec![paragraph(ParagraphType::Alignment, 3, 4)]);
+
+        assert_eq!(common.alignment_at_paragraph(3), ParagraphAlignment::Left);
     }
 }

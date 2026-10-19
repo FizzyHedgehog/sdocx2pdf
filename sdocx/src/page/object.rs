@@ -45,7 +45,8 @@ pub use shape_base::{
 };
 pub use shared::{ColourType, GradientColour, GradientType, Path, PathSegment};
 pub use text_core::{
-    BulletKind, BulletStyle, InTextLayoutConstraint, InTextLayoutOption, InlineObject, TextStyle,
+    BulletKind, BulletStyle, InTextLayoutConstraint, InTextLayoutOption, InlineObject,
+    ParagraphAlignment, TextStyle,
 };
 
 #[derive(Error, Debug)]
