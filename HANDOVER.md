@@ -67,15 +67,31 @@
 - 우리는 `• ` / `1. ` 를 텍스트로 그려서 마커 폭만큼만 들여쓴다 → 들여쓰기 폭과 마커 모양이 다르다.
 - 개선하려면 마커를 텍스트가 아닌 별도 드로잉으로 분리하고, 들여쓰기를 `INDENT_STEP_EM` 기준으로 맞춰야 한다.
 
-### 🟡 페이지 8 — 이미지 회전 미적용
+### ✅ 페이지 8 — 이미지 회전 (검증 결과: **이미 구현되어 정상 동작**)
 
-- sdocx 객체에 `angle` (회전 각도)이 있으나 이미지 렌더링 시 미적용. `draw_image` 경로에 `push_transform(rotation_about_centre(...))` 추가 필요.
-- 텍스트 상자 회전은 이미 구현되어 있으니 동일 패턴 차용.
+- 2026-10-20 확인: 9페이지(0-indexed 8) 이미지는 `-33°`로 정상 회전 출력된다. 이 항목은 오기였음.
+- 경로: `page.rs draw_single_object` → `shape.rs draw_shape` → `draw_image`의
+  `Transform::from_rotate_at(template.rotation, ...)`. krilla는 **도(degree)** 단위를 받는다.
+  `template.rotation`은 파싱 시 `original_angle`에서 채워진다(`sdocx/src/page/object/shape.rs`).
+- 정량 검증(정답 PDF vs 출력, 이미지 CTM): `356.4356 231.4720 -148.1736 228.1673 202.1016 …`
+  → 회전 33.000°, 스케일 425.0007 × 272.0583pt, 2.8376 px/pt (양축 균일). 사실상 동일.
+- 확대는 별도 배율 필드가 아니라 객체 `rect` 자체에 반영되어 있다(`original_rect == rect`, `crop_rect = None`).
+  우리는 `rect` 크기로 그리므로 **확대 + 회전이 함께** 재현된다.
+- **남은 구멍(잠재적)**: `draw_single_object`가 Image/Shape에 대해 `object_base().angle()`을 읽지 않는다.
+  - `template`이 없으면(`path_bin_size == 0`) `NothingDrawn` → **이미지가 아예 안 그려짐**.
+  - `template.rotation == 0`인데 `angle`만 있으면 수평으로 그려짐.
+  - 수정 시 `draw_image` 내부 회전과 **이중 적용**되지 않도록 `draw_image`에는 rotation 0을 넘겨야 한다.
+  - 현재 테스트 파일의 이미지·도형 7개는 전부 `template`이 있으므로 실측 재현 사례는 없음.
 
 ### 🟡 페이지 10 — 이미지 크롭(Clipping)
 
 - 이미지가 용지 경계를 넘어갈 때 삼성노트는 용지 내 범위만 보임. 현재는 전체 이미지가 찌그러지거나 넘침.
 - `page.rect` 기준 clip 적용 필요.
+
+### 🟡 페이지 높이 0.29pt 차이 (전 페이지 공통)
+
+- 출력 페이지 높이 **848.28766pt** vs 정답 **848.0pt** → 모든 콘텐츠가 0.29pt(2배 렌더링 시 0.58px) 아래로 밀린다.
+- 9페이지 이미지 픽셀 diff가 이미지 가장자리에만 얇게 나타나는 원인이 이것. 정답은 배경 Form을 y=-0.2877만큼 올려서 맞춘다.
 
 ### 🟡 점선/파선 (페이지 4)
 
