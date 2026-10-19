@@ -230,27 +230,29 @@ impl Tool {
         // because their widths vary smoothly.
         let is_dashed = !line_type.is_continuous();
 
-        // When a stroke is drawn as a filled outline, it is built from circles of radius
-        // `0.5 * size * pressure`, so its visible width is `size * pressure`. A dash is stroked at
-        // a constant width, so we use the same effective width to keep the two consistent.
-        let pressure_for_width = if self.is_pressure_sensitive() {
-            0.55
-        } else {
-            0.45
-        };
-        let visual_width = size * pressure_for_width;
+        // Dashed and dotted strokes are always drawn at a constant width - the app does not apply
+        // pressure to them - and that width is the full pen size rather than the pressure-reduced
+        // width used for the filled outline of a continuous stroke. This matters twice over: it is
+        // the stroked width, and it is also the unit the dash pattern is expressed in, so getting
+        // it wrong changes both the thickness of the dashes and their spacing.
+        let dash_width = size;
 
+        // Measured against Samsung Notes' own rendering: the dashed pattern has a period of exactly
+        // six stroke widths, and the dotted pattern repeats every two. Because the line caps are
+        // round, each dash is extended by half a width at either end, so a dashed stroke's visible
+        // dash is 3.7 widths long with a 2.3 width gap, and a dotted stroke's dots are one width
+        // across with one width of space between them.
         let dash = if is_dashed {
             match line_type {
                 LineType::Continuous => None,
                 LineType::Dashed => Some(paint::StrokeDash {
-                    array: vec![visual_width * 3.0, visual_width * 2.0],
+                    array: vec![dash_width * 2.7, dash_width * 3.3],
                     offset: 0.0,
                 }),
                 LineType::Dotted => Some(paint::StrokeDash {
                     // A zero-length dash combined with a round line cap draws a filled circle, so
                     // we get perfectly round dots.
-                    array: vec![0.0, (visual_width * 2.5).max(visual_width * 2.0)],
+                    array: vec![0.0, dash_width * 2.0],
                     offset: 0.0,
                 }),
             }
@@ -270,7 +272,7 @@ impl Tool {
             surface.set_fill(None);
             surface.set_stroke(Some(paint::Stroke {
                 paint,
-                width: if dash.is_some() { visual_width } else { size },
+                width: if dash.is_some() { dash_width } else { size },
                 line_cap: krilla::paint::LineCap::Round,
                 line_join: krilla::paint::LineJoin::Round,
                 opacity,
