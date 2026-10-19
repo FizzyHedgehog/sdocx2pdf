@@ -637,6 +637,25 @@ impl Shape {
     pub fn image_data(&self) -> &ImageData {
         &self.image_data
     }
+
+    /// Rectangle of the shape before the object was scaled or rotated.
+    pub fn original_rect(&self) -> Box2d<f64> {
+        self.shape_data.original_rect
+    }
+
+    /// Rotation of the shape before the object was rotated, in degrees.
+    pub fn original_angle(&self) -> f32 {
+        self.shape_data.original_angle
+    }
+
+    /// Rectangle the shape was drawn in before it was scaled.
+    pub fn original_drawn_rect(&self) -> Option<Box2d<f64>> {
+        self.shape_data.original_drawn_rect
+    }
+
+    pub fn shape_type(&self) -> &ShapeType {
+        &self.shape_data.shape_type
+    }
 }
 
 impl<'a, R: Read + Seek> TryParseWithContext<R, ShapeParseContext<'a, 'a>> for Shape {
