@@ -179,7 +179,16 @@ impl PenInfo {
             },
         };
 
-        stream.ensure_eof()?;
+        // Forward compatibility: drain any unknown trailing bytes in the pen info struct
+        // (e.g. 44 bytes added in newer Samsung Notes builds / One UI 9) instead of failing.
+        let remaining = stream.n_remaining();
+        if remaining > 0 {
+            log::debug!(
+                "PenInfo: draining {} trailing bytes for forward compatibility",
+                remaining
+            );
+            std::io::copy(&mut stream, &mut std::io::sink())?;
+        }
 
         Ok(pen_info)
     }

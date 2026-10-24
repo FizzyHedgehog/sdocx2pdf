@@ -2,8 +2,8 @@
 
 > 작성일: 2026-10-20
 > 작업 브랜치: `feature/png-support`
-> 테스트 파일: `/Users/kyungmolee01/Downloads/테스트 파일/모든 테스트.sdocx`
-> 정답 PDF: `/Users/kyungmolee01/Downloads/테스트 파일/모든 테스트.pdf` (12페이지)
+> 테스트 파일: `~/Downloads/테스트 파일/모든 테스트.sdocx`
+> 정답 PDF: `~/Downloads/테스트 파일/모든 테스트.pdf` (12페이지)
 
 ---
 
@@ -38,7 +38,7 @@
 
 ```bash
 cargo build --release
-./target/release/sdocx2pdf "/Users/kyungmolee01/Downloads/테스트 파일/모든 테스트.sdocx" /tmp/final_check.pdf
+./target/release/sdocx2pdf "$HOME/Downloads/테스트 파일/모든 테스트.sdocx" /tmp/final_check.pdf
 # → Wrote 1.34 MiB to '/tmp/final_check.pdf'
 ```
 
@@ -178,7 +178,7 @@ q 0 0 0 rg 0 0 0 RG 600 0 0 848.28766 0 -.28765869 cm /FXX1 Do Q
 | `/tmp/pairs.py`, `/tmp/montage.py` | 정답/출력/히트맵 나란히 비교 이미지 생성 |
 
 필요 패키지: `pdfplumber`, `pypdfium2`, `pypdf`, `numpy`, `scipy`, `Pillow`
-(venv: `/Users/kyungmolee01/.workbuddy-ai/binaries/python/envs/default`)
+(venv: `~/.workbuddy-ai/binaries/python/envs/default`)
 
 ### 정답 PDF 구조 파악
 
@@ -202,7 +202,7 @@ raw = form.get_data().decode('latin-1', errors='replace')
 
 ### 테스트 파일
 
-`/Users/kyungmolee01/Downloads/테스트 파일/` 의 `모든 테스트.sdocx` + `모든 테스트.pdf`.
+`~/Downloads/테스트 파일/` 의 `모든 테스트.sdocx` + `모든 테스트.pdf`.
 이전 `텍스트 test file_261019_053515.sdocx` 는 더 이상 사용하지 않는다.
 
 ---
