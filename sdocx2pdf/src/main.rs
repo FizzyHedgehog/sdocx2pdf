@@ -135,6 +135,14 @@ struct Args {
     )]
     marker_width_multiplier: f32,
 
+    /// Specifies an opacity multiplier for the marker pen and highlighter (0.0 to 1.0).
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Scale the opacity of all highlighters and marker pens (0.0 to 1.0)"
+    )]
+    marker_opacity: f32,
+
     // !!! - Do not rename this without changing `DETAILED_ERRORS_ARG_NAME` to match.
     #[arg(
         long,
@@ -253,6 +261,7 @@ fn create_document_pdf(
             page.objects(),
             args.pen_width_multiplier,
             args.marker_width_multiplier,
+            args.marker_opacity,
             media_storage,
         );
 
@@ -260,6 +269,7 @@ fn create_document_pdf(
             page.objects(),
             args.pen_width_multiplier,
             args.marker_width_multiplier,
+            args.marker_opacity,
             multi_progress,
             media_storage,
         );

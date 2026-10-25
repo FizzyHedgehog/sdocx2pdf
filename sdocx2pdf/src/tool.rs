@@ -70,6 +70,14 @@ impl Basics {
             ..self
         }
     }
+
+    fn with_scaled_opacity(mut self, opacity_mul: f32) -> Basics {
+        let new_a = ((self.colour_bgra[3] as f32) * opacity_mul)
+            .clamp(0.0, 255.0)
+            .round() as u8;
+        self.colour_bgra[3] = new_a;
+        self
+    }
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
@@ -143,12 +151,23 @@ impl Tool {
         Self::try_for_stroke(stroke).unwrap()
     }
 
-    pub fn with_scaled_width(mut self, handwriting_mul: f32, marker_mul: f32) -> Tool {
+    pub fn with_scaled_width(self, handwriting_mul: f32, marker_mul: f32) -> Tool {
+        self.with_scaled_width_and_opacity(handwriting_mul, marker_mul, 1.0)
+    }
+
+    pub fn with_scaled_width_and_opacity(
+        mut self,
+        handwriting_mul: f32,
+        marker_mul: f32,
+        marker_opacity: f32,
+    ) -> Tool {
         let like_hl = self.is_like_highlighter();
         let basics = self.basics_mut();
 
         *basics = if like_hl {
-            basics.with_scaled_width(marker_mul)
+            basics
+                .with_scaled_width(marker_mul)
+                .with_scaled_opacity(marker_opacity)
         } else {
             basics.with_scaled_width(handwriting_mul)
         };

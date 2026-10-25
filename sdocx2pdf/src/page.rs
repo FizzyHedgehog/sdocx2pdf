@@ -1647,6 +1647,7 @@ impl<'s> PageConversionCtx<'s> {
         object: &sdocx::DocObject,
         pen_width_mul: f32,
         marker_width_mul: f32,
+        marker_opacity: f32,
         media: &mut MediaStorage,
     ) -> Result<(), DrawObjectError> {
         match object {
@@ -1654,7 +1655,11 @@ impl<'s> PageConversionCtx<'s> {
                 .draw_stroke_chunk_events(
                     [EventGroup::from_stroke(stroke)],
                     &self.boundary_path(),
-                    Tool::for_stroke(stroke).with_scaled_width(pen_width_mul, marker_width_mul),
+                    Tool::for_stroke(stroke).with_scaled_width_and_opacity(
+                        pen_width_mul,
+                        marker_width_mul,
+                        marker_opacity,
+                    ),
                 )
                 .map_err(|()| DrawObjectError::Stroke),
 
@@ -1799,6 +1804,7 @@ impl<'s> PageConversionCtx<'s> {
         inline_objects: impl IntoIterator<Item = &'a InlineObject>,
         pen_width_mul: f32,
         marker_width_mul: f32,
+        marker_opacity: f32,
         media: &mut MediaStorage,
     ) {
         self.draw_body_text_and_inline_objects(
@@ -1808,6 +1814,7 @@ impl<'s> PageConversionCtx<'s> {
             std::iter::empty(),
             pen_width_mul,
             marker_width_mul,
+            marker_opacity,
             media,
         );
     }
@@ -1821,6 +1828,7 @@ impl<'s> PageConversionCtx<'s> {
         floating_objects: impl IntoIterator<Item = &'a DocObject>,
         pen_width_mul: f32,
         marker_width_mul: f32,
+        marker_opacity: f32,
         media: &mut MediaStorage,
     ) {
         let page_width = self.input_box.width() as f32;
@@ -2002,10 +2010,22 @@ impl<'s> PageConversionCtx<'s> {
                                 if shift > 0.01 {
                                     self.surface
                                         .push_transform(&Transform::from_translate(0.0, shift));
-                                    self.draw_inline_object(io, pen_width_mul, marker_width_mul, media);
+                                    self.draw_inline_object(
+                                        io,
+                                        pen_width_mul,
+                                        marker_width_mul,
+                                        marker_opacity,
+                                        media,
+                                    );
                                     self.surface.pop();
                                 } else {
-                                    self.draw_inline_object(io, pen_width_mul, marker_width_mul, media);
+                                    self.draw_inline_object(
+                                        io,
+                                        pen_width_mul,
+                                        marker_width_mul,
+                                        marker_opacity,
+                                        media,
+                                    );
                                 }
 
                                 // Continue the text flow below the object so that any following
@@ -2054,10 +2074,22 @@ impl<'s> PageConversionCtx<'s> {
             if shift > 0.01 {
                 self.surface
                     .push_transform(&Transform::from_translate(0.0, shift));
-                self.draw_inline_object(io, pen_width_mul, marker_width_mul, media);
+                self.draw_inline_object(
+                    io,
+                    pen_width_mul,
+                    marker_width_mul,
+                    marker_opacity,
+                    media,
+                );
                 self.surface.pop();
             } else {
-                self.draw_inline_object(io, pen_width_mul, marker_width_mul, media);
+                self.draw_inline_object(
+                    io,
+                    pen_width_mul,
+                    marker_width_mul,
+                    marker_opacity,
+                    media,
+                );
             }
 
             flow.cur_y = flow.cur_y.max(obj_y + shift + obj_h + 10.0);
@@ -2071,10 +2103,17 @@ impl<'s> PageConversionCtx<'s> {
         inline_object: &InlineObject,
         pen_width_mul: f32,
         marker_width_mul: f32,
+        marker_opacity: f32,
         media: &mut MediaStorage,
     ) {
         if let Err(err) =
-            self.draw_single_object(&inline_object.object, pen_width_mul, marker_width_mul, media)
+            self.draw_single_object(
+                &inline_object.object,
+                pen_width_mul,
+                marker_width_mul,
+                marker_opacity,
+                media,
+            )
         {
             err.log();
         }
@@ -2085,6 +2124,7 @@ impl<'s> PageConversionCtx<'s> {
         objects: impl ExactSizeIterator<Item = &'d DocObject>,
         pen_width_mul: f32,
         marker_width_mul: f32,
+        marker_opacity: f32,
         multi_progress: &MultiProgress,
         media: &mut MediaStorage,
     ) {
@@ -2106,7 +2146,11 @@ impl<'s> PageConversionCtx<'s> {
             .inspect(|_| objects_bar.inc(1))
             .chunk_by(|&obj| match obj {
                 sdocx::DocObject::Stroke(stroke) => Some(
-                    Tool::for_stroke(stroke).with_scaled_width(pen_width_mul, marker_width_mul),
+                    Tool::for_stroke(stroke).with_scaled_width_and_opacity(
+                        pen_width_mul,
+                        marker_width_mul,
+                        marker_opacity,
+                    ),
                 ),
                 _non_stroke => None,
             });
@@ -2138,7 +2182,13 @@ impl<'s> PageConversionCtx<'s> {
             // This is a chunk of non-strokes.
             for obj in objects {
                 if let Err(err) =
-                    self.draw_single_object(obj, pen_width_mul, marker_width_mul, media)
+                    self.draw_single_object(
+                        obj,
+                        pen_width_mul,
+                        marker_width_mul,
+                        marker_opacity,
+                        media,
+                    )
                 {
                     err.log();
                 }
